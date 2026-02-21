@@ -76,7 +76,7 @@ export default function ResearchPostPage({ onOpenLogin, theme, onThemeToggle }) 
                                 onMouseEnter={e => e.currentTarget.style.background = 'var(--text-secondary)'}
                                 onMouseLeave={e => e.currentTarget.style.background = 'var(--text-primary)'}
                             >
-                                Visit evals.interius.com ↗
+                                Visit prosits.interius.com ↗
                             </button>
                         </div>
                     </header>
