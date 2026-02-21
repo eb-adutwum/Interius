@@ -53,7 +53,7 @@ export default function ResearchPostPage({ onOpenLogin, theme, onThemeToggle }) 
                         </p>
 
                         <div style={{ display: 'flex', gap: '16px', justifyContent: 'center' }}>
-                            <button style={{
+                            <a href={post.codeLink} target="_blank" rel="noopener noreferrer" style={{
                                 padding: '8px 16px',
                                 background: 'transparent',
                                 color: 'var(--text-primary)',
@@ -65,13 +65,14 @@ export default function ResearchPostPage({ onOpenLogin, theme, onThemeToggle }) 
                                 display: 'flex',
                                 alignItems: 'center',
                                 gap: '8px',
+                                textDecoration: 'none',
                                 transition: 'background 0.2s',
                             }}
                                 onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-secondary)'}
                                 onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
                             >
-                                Read the paper ↗
-                            </button>
+                                View code ↗
+                            </a>
 
                             <button style={{
                                 padding: '8px 16px',
@@ -111,8 +112,8 @@ export default function ResearchPostPage({ onOpenLogin, theme, onThemeToggle }) 
                                 remarkPlugins={[remarkGfm, remarkMath]}
                                 rehypePlugins={[rehypeKatex]}
                                 components={{
-                                    h2: ({ node, ...props }) => <h2 style={{ fontSize: '2.5rem', fontWeight: '700', letterSpacing: '-0.02em', marginTop: '4rem', marginBottom: '1.5rem', color: 'var(--text-primary)', lineHeight: '1.2' }} {...props} />,
-                                    h3: ({ node, ...props }) => <h3 style={{ fontSize: '1.75rem', fontWeight: '600', letterSpacing: '-0.01em', marginTop: '3rem', marginBottom: '1.25rem', color: 'var(--text-primary)' }} {...props} />,
+                                    h2: ({ node, ...props }) => <h2 style={{ fontSize: '1.85rem', fontWeight: '600', letterSpacing: '-0.01em', marginTop: '3.5rem', marginBottom: '1.25rem', color: 'var(--text-primary)', lineHeight: '1.3' }} {...props} />,
+                                    h3: ({ node, ...props }) => <h3 style={{ fontSize: '1.4rem', fontWeight: '600', letterSpacing: '-0.005em', marginTop: '2.5rem', marginBottom: '1rem', color: 'var(--text-primary)' }} {...props} />,
                                     p: ({ node, ...props }) => <p style={{ marginBottom: '1.75rem', opacity: 0.9 }} {...props} />,
                                     ul: ({ node, ...props }) => <ul style={{ marginBottom: '1.75rem', paddingLeft: '2rem', opacity: 0.9 }} {...props} />,
                                     li: ({ node, ...props }) => <li style={{ marginBottom: '0.75rem' }} {...props} />,

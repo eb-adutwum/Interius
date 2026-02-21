@@ -12,8 +12,10 @@ export const RESEARCH_POSTS = [
         date: "Feb 04, 2026",
         category: "Natural Language Processing",
         readTime: "12 min read",
-        bgConfig: "linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%)", // Very subtle grey
+        bgLight: "linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%)",
+        bgDark: "linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%)",
         textColor: "var(--text-primary)",
+        codeLink: "https://github.com/NLP-Group4/Prosit1/tree/main/sectionB/final%20submission",
         content: `## Language Models and Their Use
 
 At a fundamental level, language models are an attempt to endow machines with a workable form of linguistic competence. In human communication, understanding is revealed through some form of appropriate response: given a context, a competent speaker has expectations about what is likely, plausible, or surprising to say next. A language model adopts this same principle and formalizes it in probabilistic terms. Rather than claiming deep semantic understanding (which remains a philosophical debate), it measures comprehension through the ability to assign sensible expectations to linguistic continuations.
@@ -70,8 +72,10 @@ Qualitative evaluation complemented the perplexity-based analysis. Lower-order m
         date: "Feb 04, 2026",
         category: "Domain Adaptation",
         readTime: "8 min read",
-        bgConfig: "linear-gradient(135deg, rgba(255, 236, 210, 0.5) 0%, rgba(252, 182, 159, 0.2) 100%)", // Very subtle warm
+        bgLight: "linear-gradient(135deg, rgba(255, 236, 210, 0.5) 0%, rgba(252, 182, 159, 0.2) 100%)",
+        bgDark: "linear-gradient(135deg, rgba(255, 140, 100, 0.08) 0%, rgba(255, 100, 80, 0.02) 100%)",
         textColor: "var(--text-primary)",
+        codeLink: "https://github.com/NLP-Group4/Prosit1/blob/main/sectionC/Medical_LoRA_finetuning_(NLP_Prosit1).ipynb",
         content: `## The Modern Paradigm of Domain Adaptation
 
 While large foundation models possess unprecedented general reasoning capabilities, they lack the specific terminology, structural formatting, and factual grounding required for highly specialized fields such as healthcare. General-purpose models often fail to provide granular, clinically sound advice without explicit domain adaptation. MedicalLM addresses this critical gap.
@@ -118,8 +122,10 @@ Following the LoRA adaptation, MedicalLM produced accurate, coherent, and rigoro
         date: "Feb 04, 2026",
         category: "Instruction Tuning",
         readTime: "9 min read",
-        bgConfig: "linear-gradient(135deg, rgba(212, 252, 121, 0.3) 0%, rgba(150, 230, 161, 0.2) 100%)", // Very subtle green
+        bgLight: "linear-gradient(135deg, rgba(212, 252, 121, 0.3) 0%, rgba(150, 230, 161, 0.2) 100%)",
+        bgDark: "linear-gradient(135deg, rgba(150, 250, 120, 0.08) 0%, rgba(100, 200, 100, 0.02) 100%)",
         textColor: "var(--text-primary)",
+        codeLink: "https://github.com/NLP-Group4/Prosit1/blob/main/sectionC/agricgpt.ipynb",
         content: `## AI for Sustainable Agriculture
 
 The agricultural sector represents one of the most critical domains for applied artificial intelligence, directly impacting global food security, climate resistance, and economic stability in developing regions. Despite this, general-purpose Large Language Models (LLMs) frequently fail to dispense accurate, scientifically grounded agricultural advice. When asked complex questions regarding soil health or pest mitigation, base models tend to hallucinate generalized treatments that are practically useless to working farmers.
@@ -179,7 +185,7 @@ export default function ResearchPage({ onOpenLogin, theme, onThemeToggle }) {
                     {RESEARCH_POSTS.map(post => (
                         <Link to={`/research/${post.id}`} key={post.id} style={{ textDecoration: 'none' }}>
                             <article style={{
-                                background: post.bgConfig,
+                                background: theme === 'dark' ? post.bgDark : post.bgLight,
                                 aspectRatio: '1',
                                 borderRadius: '12px',
                                 padding: '36px',

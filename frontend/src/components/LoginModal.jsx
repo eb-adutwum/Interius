@@ -74,7 +74,7 @@ export default function LoginModal({ isOpen, onClose }) {
 
                         <div className="login-header">
                             <div className="login-logo-wrapper">
-                                <InteriusLogo size={40} gradient />
+                                <img src="/mini.svg" alt="Interius" width={40} />
                             </div>
                             <h2>{mode === 'login' ? 'Welcome back' : 'Create account'}</h2>
                             <p>{mode === 'login' ? 'Sign in to continue to Interius' : 'Start building APIs with AI'}</p>
