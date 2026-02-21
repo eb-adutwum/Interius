@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import './Waitlist.css';
 
-export default function Waitlist() {
+export default function Waitlist({ onTryApp }) {
     return (
         <section className="cta-section" id="waitlist">
             <div className="cta-gradient" />
@@ -29,7 +29,7 @@ export default function Waitlist() {
                     viewport={{ once: true }}
                     transition={{ delay: 0.2, duration: 0.5 }}
                 >
-                    <button className="btn-primary" onClick={() => window.open('https://app.interius.dev', '_blank')}>
+                    <button className="btn-primary" onClick={onTryApp}>
                         Try the app, it's free
                     </button>
                     <button className="btn-secondary">

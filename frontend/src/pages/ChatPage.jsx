@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
 import ThemeToggle from '../components/ThemeToggle';
+import { supabase } from '../lib/supabase';
+import { generateThreadTitle } from '../lib/llm';
 import './ChatPage.css';
 
 /* ─── Static Data ─── */
@@ -259,7 +261,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [selectedModel, setSelectedModel] = useState('pro');
-    const [threads, setThreads] = useState(INITIAL_THREADS);
+    const [threads, setThreads] = useState([]);
     const [activeThread, setActiveThread] = useState(null);
     const [messages, setMessages] = useState([]);
     const [input, setInput] = useState('');
@@ -288,6 +290,46 @@ export default function ChatPage({ theme, onThemeToggle }) {
         return () => document.removeEventListener('mousedown', handler);
     }, []);
 
+    // Load user's threads on mount
+    useEffect(() => {
+        if (!user) return;
+        const fetchThreads = async () => {
+            const { data } = await supabase.from('threads').select('*').order('created_at', { ascending: false });
+            if (data) setThreads(data);
+        };
+        fetchThreads();
+    }, [user]);
+
+    // Load messages when activeThread changes
+    useEffect(() => {
+        if (!activeThread) {
+            setMessages([]);
+            return;
+        }
+        const fetchMessages = async () => {
+            const { data } = await supabase.from('messages')
+                .select('*')
+                .eq('thread_id', activeThread)
+                .order('created_at', { ascending: true });
+
+            if (data) {
+                // Parse the DB rows back into the frontend schema
+                const formatted = data.map(msg => ({
+                    id: msg.id,
+                    type: msg.role,
+                    text: msg.content,
+                    files: [] // For simplicity in this demo
+                }));
+                // We add the mock agent final response properties dynamically if it's an agent
+                const withMockData = formatted.map(msg =>
+                    msg.type === 'agent' ? { ...msg, showEndpoints: true, files: AGENT_FINAL.files } : msg
+                );
+                setMessages(withMockData);
+            }
+        };
+        fetchMessages();
+    }, [activeThread]);
+
     const { recording, toggle: toggleRecording } = useVoiceRecorder((text) => {
         setInput(prev => prev ? prev + ' ' + text : text);
     });
@@ -295,9 +337,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
     const handleLogout = () => { logout(); navigate('/'); };
 
     const handleNewThread = () => {
-        const id = Date.now();
-        setThreads(t => [{ id, title: 'new-thread' }, ...t]);
-        setActiveThread(id);
+        setActiveThread(null);
         setMessages([]);
         setInput('');
         setAttachedFiles([]);
@@ -305,10 +345,11 @@ export default function ChatPage({ theme, onThemeToggle }) {
         setPreviewFile(null);
     };
 
-    const handleDeleteThread = (e, id) => {
+    const handleDeleteThread = async (e, id) => {
         e.stopPropagation();
         setThreads(t => t.filter(x => x.id !== id));
         if (activeThread === id) { setActiveThread(null); setMessages([]); }
+        await supabase.from('threads').delete().eq('id', id);
     };
 
     const handleSuggestEdits = () => {
@@ -347,19 +388,41 @@ export default function ChatPage({ theme, onThemeToggle }) {
     };
 
     const sendMessage = async (text) => {
-        if (!text || isTyping) return;
+        if (!text || isTyping || !user) return;
 
-        if (!activeThread) {
-            const id = Date.now();
-            const title = (text.length > 28 ? text.slice(0, 28) + '\u2026' : text).toLowerCase().replace(/\s+/g, '-');
-            setThreads(t => [{ id, title }, ...t]);
-            setActiveThread(id);
+        let threadId = activeThread;
+
+        // Create new thread if none active
+        if (!threadId) {
+            const generatedTitle = await generateThreadTitle(text);
+            const { data, error } = await supabase.from('threads').insert({
+                user_id: user.id,
+                title: generatedTitle
+            }).select().single();
+
+            if (!error && data) {
+                threadId = data.id;
+                setThreads(t => [data, ...t]);
+                setActiveThread(threadId);
+            } else {
+                console.error("Failed to create thread", error);
+                return;
+            }
         }
 
+        // Add user message to UI
         setMessages(m => [...m, { type: 'user', text, files: attachedFiles.map(f => f.name) }]);
         setAttachedFiles([]);
         setIsTyping(true);
         setTypingStep(0);
+
+        // Save user message to DB
+        await supabase.from('messages').insert({
+            thread_id: threadId,
+            user_id: user.id,
+            role: 'user',
+            content: text
+        });
 
         for (let i = 0; i < AGENT_STEPS.length; i++) {
             await new Promise(r => setTimeout(r, 550));
@@ -367,7 +430,20 @@ export default function ChatPage({ theme, onThemeToggle }) {
         }
         await new Promise(r => setTimeout(r, 350));
         setIsTyping(false);
+
+        const finalAgentContent = AGENT_FINAL.text;
+
+        // Add agent message to UI
         setMessages(m => [...m, { type: 'agent', steps: AGENT_STEPS, ...AGENT_FINAL, id: Date.now() }]);
+
+        // Save agent message to DB
+        await supabase.from('messages').insert({
+            thread_id: threadId,
+            user_id: user.id,
+            role: 'agent',
+            content: finalAgentContent
+        });
+
         setPanelMode(null);
         inputRef.current?.focus();
     };
