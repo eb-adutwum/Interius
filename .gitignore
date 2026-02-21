@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+.env
+.env.*
+!.env.example
+.DS_Store
+# npm
+npm-debug.log*
+# yarn
+yarn-debug.log*
+yarn-error.log*
+.idea/
+.vscode/
+*.log
