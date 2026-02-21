@@ -252,9 +252,9 @@ export default function AboutPage({ onOpenLogin, theme, onThemeToggle }) {
                     </div>
                 </section>
 
-                <div style={{ width: '100%', height: '1px', background: 'var(--border-subtle)', margin: '120px 0' }} />
+                <div style={{ width: '100%', height: '1px', background: 'var(--border-subtle)', margin: '80px 0' }} />
 
-                <section style={{ marginBottom: '120px', maxWidth: '1000px', margin: '0 auto 120px' }}>
+                <section style={{ marginBottom: '60px', maxWidth: '1000px', margin: '0 auto 60px' }}>
                     <div style={{ textAlign: 'center', marginBottom: '50px' }}>
                         <h2 style={{ fontSize: '1.8rem', fontWeight: '600', letterSpacing: '-0.02em', marginBottom: '16px', color: 'var(--text-primary)' }}>Featured roles</h2>
                         <p style={{ color: 'var(--text-secondary)', fontSize: '1rem', maxWidth: '600px', margin: '0 auto', lineHeight: '1.6' }}>
