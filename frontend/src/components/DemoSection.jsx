@@ -37,13 +37,6 @@ export default function DemoSection({ onOpenLogin }) {
         setInput('');
         setMessages((m) => [...m, { id: Date.now(), type: 'user', text }]);
         setIsTyping(true);
-        await new Promise((r) => setTimeout(r, 1500));
-        setIsTyping(false);
-        setMessages((m) => [...m, {
-            id: Date.now() + 1,
-            type: 'cta',
-            text: 'Your API is ready to deploy! Open Interius to view your live endpoints, run tests, and manage your deployment.',
-        }]);
     };
 
     const handleKey = (e) => {
@@ -142,14 +135,6 @@ export default function DemoSection({ onOpenLogin }) {
                                                 <p>{msg.text}</p>
                                             </div>
                                         )}
-                                        {msg.type === 'cta' && (
-                                            <div className="msg agent-msg demo-cta-msg">
-                                                <p>{msg.text}</p>
-                                                <button className="demo-open-btn" onClick={onOpenLogin}>
-                                                    Open Interius →
-                                                </button>
-                                            </div>
-                                        )}
                                     </motion.div>
                                 ))}
                                 {isTyping && (
@@ -159,8 +144,32 @@ export default function DemoSection({ onOpenLogin }) {
                                         animate={{ opacity: 1, y: 0 }}
                                         className="msg agent-msg"
                                     >
-                                        <div className="demo-typing">
-                                            <span /><span /><span />
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
+                                            <div className="demo-typing" style={{ margin: 0 }}>
+                                                <span /><span /><span />
+                                            </div>
+                                            <button
+                                                onClick={onOpenLogin}
+                                                style={{
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '8px',
+                                                    padding: '6px 14px',
+                                                    borderRadius: '16px',
+                                                    background: 'rgba(56, 189, 248, 0.1)',
+                                                    border: '1px solid rgba(56, 189, 248, 0.4)',
+                                                    color: '#38bdf8',
+                                                    fontSize: '0.85rem',
+                                                    fontWeight: '500',
+                                                    cursor: 'pointer',
+                                                    transition: 'all 0.2s',
+                                                }}
+                                                onMouseEnter={e => { e.currentTarget.style.background = 'rgba(56, 189, 248, 0.2)' }}
+                                                onMouseLeave={e => { e.currentTarget.style.background = 'rgba(56, 189, 248, 0.1)' }}
+                                            >
+                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
+                                                View response in Interius
+                                            </button>
                                         </div>
                                     </motion.div>
                                 )}
