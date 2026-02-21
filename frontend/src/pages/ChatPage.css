@@ -810,7 +810,6 @@
 ══════════════════════════════════════════════ */
 .cp-input-bar {
     padding: 36px 20px 48px;
-    border-top: 1px solid var(--border-subtle);
     background: var(--bg-primary);
 }
 
