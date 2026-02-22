@@ -1,52 +1,59 @@
 export async function generateThreadTitle(prompt) {
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+    const apiKey = import.meta.env.VITE_GROQ_API_KEY;
 
     if (!apiKey) {
-        console.warn('No Gemini API key provided. Falling back to simple title.');
-        return (prompt.length > 28 ? prompt.slice(0, 28) + '\u2026' : prompt).toLowerCase().replace(/\s+/g, '-');
+        console.warn('No Groq API key provided. Falling back to simple title.');
+        return prompt.length > 28 ? prompt.slice(0, 28) + '\u2026' : prompt;
     }
 
     try {
-        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-
-        const response = await fetch(apiUrl, {
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
             headers: {
+                'Authorization': `Bearer ${apiKey}`,
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                system_instruction: {
-                    parts: [{ text: 'You are a helpful assistant that summarizes a user prompt into a short, hyphenated, lowercase thread title (maximum 3-4 words). Do not include any quotes or punctuation.' }]
-                },
-                contents: [{
-                    parts: [{ text: prompt }]
-                }],
-                generationConfig: {
-                    temperature: 0.3,
-                    maxOutputTokens: 30, // Increased to ensure it completes
-                }
+                model: "openai/gpt-oss-120b",
+                messages: [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant that summarizes a user prompt into a short thread title (maximum 3-4 words). Do not include any quotes or punctuation. Use normal capitalization like a phrase or sentence."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature: 1,
+                max_completion_tokens: 8192,
+                top_p: 1,
+                reasoning_effort: "medium",
+                stream: false,
+                stop: null
             })
         });
 
         if (!response.ok) {
-            throw new Error(`Gemini API returned ${response.status}`);
+            throw new Error(`Groq API returned ${response.status}`);
         }
 
         const data = await response.json();
-        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        const rawText = data.choices?.[0]?.message?.content;
 
         if (!rawText) {
-            throw new Error('Gemini API returned an empty or invalid response');
+            throw new Error('Groq API returned an empty or invalid response');
         }
 
-        let title = rawText.trim().toLowerCase().replace(/\s+/g, '-');
+        let title = rawText.trim();
 
-        // Remove trailing punctuation
-        title = title.replace(/[^a-z0-9-]+/g, '');
-        return title || 'new-thread';
+        // Remove surrounding quotes if model included them
+        title = title.replace(/^["']|["']$/g, '');
+
+        return title || 'New thread';
 
     } catch (err) {
-        console.error('Failed to generate title via Gemini:', err);
-        return (prompt.length > 28 ? prompt.slice(0, 28) + '\u2026' : prompt).toLowerCase().replace(/\s+/g, '-');
+        console.error('Failed to generate title via Groq:', err);
+        return prompt.length > 28 ? prompt.slice(0, 28) + '\u2026' : prompt;
     }
 }
