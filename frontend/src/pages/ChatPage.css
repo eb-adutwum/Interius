@@ -320,7 +320,65 @@
     transition: all var(--transition-fast);
 }
 
+.cp-thread-rename {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 5px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    transition: all var(--transition-fast);
+}
+
+.cp-thread-edit-input {
+    flex: 1;
+    min-width: 0;
+    height: 24px;
+    border-radius: 6px;
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    padding: 2px 8px;
+    font-size: 12.5px;
+    outline: none;
+}
+
+.cp-thread-edit-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.cp-thread-edit-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.cp-thread-edit-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 5px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    transition: all var(--transition-fast);
+}
+
+.cp-thread-edit-btn:hover,
+.cp-thread-rename:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
 .cp-thread-item:hover .cp-thread-delete {
+    display: flex;
+}
+
+.cp-thread-item:hover .cp-thread-rename {
     display: flex;
 }
 
@@ -619,6 +677,11 @@
     color: var(--text-primary);
 }
 
+.cp-assistant-bubble {
+    align-self: auto;
+    border-radius: 16px 16px 16px 4px;
+}
+
 .cp-attached-files {
     display: flex;
     flex-wrap: wrap;
@@ -660,12 +723,36 @@
     margin-top: 2px;
 }
 
+.cp-agent-mini-mark {
+    display: inline-flex;
+    align-items: baseline;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1;
+}
+
+.cp-agent-mini-i {
+    color: var(--text-primary);
+}
+
+.cp-agent-mini-dot {
+    color: var(--accent);
+}
+
 .cp-agent-body {
     display: flex;
     flex-direction: column;
     gap: 16px;
     min-width: 0;
     flex: 1;
+}
+
+.cp-agent-preface {
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--text-primary);
+    margin-top: 2px;
 }
 
 /* ── Thought Process Tree ── */
@@ -905,6 +992,19 @@
     gap: 8px;
 }
 
+.cp-export-block {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    background: var(--bg-card);
+    font-size: 13.5px;
+    color: var(--text-secondary);
+}
+
 .code-chip {
     padding: 6px 12px;
     border-radius: 8px;
@@ -970,6 +1070,17 @@
     color: var(--text-primary);
     border: 1px solid var(--border-subtle);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.cp-action-download {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-subtle);
+}
+
+.cp-action-download:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--text-muted);
 }
 
 .cp-action-live:hover {

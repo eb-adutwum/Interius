@@ -59,9 +59,12 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
     LLM_API_KEY: str = ""
     GEMINI_API_KEY: str = ""  # Retained for fallback
+    INTERFACE_LLM_BASE_URL: str = ""
+    INTERFACE_LLM_API_KEY: str = ""
 
     # Per-agent configured models
     MODEL_DEFAULT: str = "deepseek/deepseek-r1-0528:free"
+    MODEL_INTERFACE: str = "deepseek/deepseek-r1-0528:free"
     MODEL_IMPLEMENTER: str = "arcee-ai/trinity-large-preview:free"
     MODEL_REVIEWER: str = "arcee-ai/trinity-large-preview:free"
 

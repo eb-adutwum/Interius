@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Link } from 'react-router-dom';
+import { Link, NavLink } from 'react-router-dom';
 import ThemeToggle from './ThemeToggle';
 import './Navbar.css';
 
@@ -24,6 +24,20 @@ export default function Navbar({ onLoginClick, theme, onThemeToggle }) {
         <Link to="/" className="navbar-logo">
           Interius<span className="logo-period">.</span>
         </Link>
+        <div className="navbar-links" aria-label="Primary">
+          <NavLink
+            to="/about"
+            className={({ isActive }) => `navbar-link${isActive ? ' active' : ''}`}
+          >
+            About
+          </NavLink>
+          <NavLink
+            to="/research"
+            className={({ isActive }) => `navbar-link${isActive ? ' active' : ''}`}
+          >
+            Research
+          </NavLink>
+        </div>
         <div className="navbar-actions">
           <ThemeToggle theme={theme} onToggle={onThemeToggle} />
           <button className="navbar-login" onClick={onLoginClick}>Log in</button>

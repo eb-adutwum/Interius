@@ -12,9 +12,14 @@ OutType = TypeVar("OutType", bound=BaseModel)
 class BaseAgent(ABC, Generic[InType, OutType]):
     """Abstract base class for all agents in the pipeline."""
 
-    def __init__(self, model_name: str | None = None):
+    def __init__(
+        self,
+        model_name: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ):
         model_to_use = model_name or settings.MODEL_DEFAULT
-        self.llm = LLMClient(model_name=model_to_use)
+        self.llm = LLMClient(model_name=model_to_use, base_url=base_url, api_key=api_key)
 
     @abstractmethod
     async def run(self, input_data: InType) -> OutType:

@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import ThemeToggle from '../components/ThemeToggle';
 import { supabase } from '../lib/supabase';
 import { generateThreadTitle } from '../lib/llm';
+import { routeChatIntent } from '../lib/interface';
 import './ChatPage.css';
 
 /* ─── Static Data ─── */
@@ -126,6 +127,8 @@ RUN pip install -r requirements.txt
 COPY . .
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]`,
 };
+
+const MOCK_EXPORT_ROOT = 'backend';
 
 /* ─── Endpoint Test Panel Data ─── */
 const ENDPOINTS = [
@@ -298,6 +301,8 @@ export default function ChatPage({ theme, onThemeToggle }) {
     const [typingStep, setTypingStep] = useState(0);
     const [panelMode, setPanelMode] = useState(null);
     const [previewFile, setPreviewFile] = useState(null);
+    const [editingThreadId, setEditingThreadId] = useState(null);
+    const [editingThreadTitle, setEditingThreadTitle] = useState('');
     const [attachedFiles, setAttachedFiles] = useState([]);
     const [activeTab, setActiveTab] = useState('Local');
     const [editSuggestion, setEditSuggestion] = useState('');
@@ -459,12 +464,75 @@ export default function ChatPage({ theme, onThemeToggle }) {
         inputRef.current?.focus();
     };
 
+    const beginEditThreadTitle = (e, thread) => {
+        e.stopPropagation();
+        setEditingThreadId(thread.id);
+        setEditingThreadTitle(thread.title || '');
+    };
+
+    const cancelEditThreadTitle = (e) => {
+        e?.stopPropagation?.();
+        setEditingThreadId(null);
+        setEditingThreadTitle('');
+    };
+
+    const saveThreadTitle = async (e, threadId) => {
+        e?.stopPropagation?.();
+        const nextTitle = editingThreadTitle.trim();
+        if (!nextTitle) {
+            cancelEditThreadTitle();
+            return;
+        }
+
+        const previousTitle = threads.find((t) => t.id === threadId)?.title;
+        setThreads((curr) => curr.map((t) => (t.id === threadId ? { ...t, title: nextTitle } : t)));
+
+        const { error } = await supabase
+            .from('threads')
+            .update({ title: nextTitle })
+            .eq('id', threadId);
+
+        if (error) {
+            console.error('Failed to rename thread', error);
+            if (previousTitle != null) {
+                setThreads((curr) => curr.map((t) => (t.id === threadId ? { ...t, title: previousTitle } : t)));
+            }
+        }
+
+        cancelEditThreadTitle();
+    };
+
+    const autoRenameThreadFromBuildPrompt = async (threadId, promptText) => {
+        if (!threadId || !promptText?.trim()) return;
+
+        const previousTitle = threads.find((t) => t.id === threadId)?.title;
+        const nextTitle = (await generateThreadTitle(promptText))?.trim();
+
+        if (!nextTitle || nextTitle === previousTitle) return;
+
+        setThreads((curr) => curr.map((t) => (t.id === threadId ? { ...t, title: nextTitle } : t)));
+
+        const { error } = await supabase
+            .from('threads')
+            .update({ title: nextTitle })
+            .eq('id', threadId);
+
+        if (error) {
+            console.error('Failed to auto-rename thread from build prompt', error);
+            if (previousTitle != null) {
+                setThreads((curr) => curr.map((t) => (t.id === threadId ? { ...t, title: previousTitle } : t)));
+            }
+        }
+    };
+
     const sendMessage = async (text) => {
         if (!text || isGeneratingRef.current || !user) return;
 
         isGeneratingRef.current = true;
 
         let threadId = activeThread;
+        const hadExistingBuild = messages.some((m) => m.type === 'agent');
+        let createdThreadThisSend = false;
 
         // Create new thread if none active
         if (!threadId) {
@@ -476,6 +544,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
 
             if (!error && data) {
                 threadId = data.id;
+                createdThreadThisSend = true;
                 setThreads(t => [data, ...t]);
                 setActiveThread(threadId);
                 localStorage.setItem('interius_active_thread', threadId);
@@ -497,6 +566,53 @@ export default function ChatPage({ theme, onThemeToggle }) {
             role: 'user',
             content: text
         });
+
+        let interfaceDecision = null;
+        try {
+            interfaceDecision = await routeChatIntent(text);
+        } catch (error) {
+            console.warn('Interface routing unavailable, falling back to mock pipeline:', error);
+        }
+
+        if (interfaceDecision?.should_trigger_pipeline === false) {
+            const assistantReply = (interfaceDecision.assistant_reply || 'Happy to help.').trim();
+
+            setIsTyping(false);
+            setMessages(m => [...m, { type: 'assistant', text: assistantReply }]);
+
+            await supabase.from('messages').insert({
+                thread_id: threadId,
+                user_id: user.id,
+                role: 'assistant',
+                content: assistantReply
+            });
+
+            isGeneratingRef.current = false;
+            setPanelMode(null);
+            inputRef.current?.focus();
+            return;
+        }
+
+        if (interfaceDecision?.should_trigger_pipeline === true) {
+            const assistantReply = (interfaceDecision.assistant_reply || '').trim();
+
+            // If the user started with small talk and later asks for a build,
+            // retitle the thread from the first real build request.
+            if (!createdThreadThisSend && !hadExistingBuild) {
+                void autoRenameThreadFromBuildPrompt(threadId, text);
+            }
+
+            if (assistantReply) {
+                setMessages(m => [...m, { type: 'assistant', text: assistantReply }]);
+
+                await supabase.from('messages').insert({
+                    thread_id: threadId,
+                    user_id: user.id,
+                    role: 'assistant',
+                    content: assistantReply
+                });
+            }
+        }
 
         // Initialize agent message in UI
         const msgId = Date.now();
@@ -534,7 +650,8 @@ export default function ChatPage({ theme, onThemeToggle }) {
             const finalPayload = {
                 isStreaming: false,
                 status: 'completed',
-                ...AGENT_FINAL
+                ...AGENT_FINAL,
+                text: AGENT_FINAL.text
             };
 
             setMessages(curr => curr.map(msg => msg.id === msgId ? { ...msg, ...finalPayload } : msg));
@@ -583,7 +700,8 @@ export default function ChatPage({ theme, onThemeToggle }) {
         const finalPayload = {
             isStreaming: false,
             status: 'completed',
-            ...AGENT_FINAL
+            ...AGENT_FINAL,
+            text: AGENT_FINAL.text
         };
 
         setMessages(curr => curr.map(msg => msg.id === msgId ? { ...msg, ...finalPayload } : msg));
@@ -643,6 +761,60 @@ export default function ChatPage({ theme, onThemeToggle }) {
 
     const fillSuggestion = (label) => { setInput(label); inputRef.current?.focus(); };
 
+    const triggerFileDownload = (filename, content) => {
+        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    };
+
+    const downloadMockFilesIndividually = () => {
+        Object.entries(MOCK_FILES).forEach(([path, content]) => {
+            const flatName = `${MOCK_EXPORT_ROOT}__${path.replaceAll('/', '__')}`;
+            triggerFileDownload(flatName, content);
+        });
+    };
+
+    const writeFileToDirectory = async (rootHandle, relativePath, content) => {
+        const parts = relativePath.split('/');
+        let dirHandle = rootHandle;
+
+        for (let i = 0; i < parts.length - 1; i++) {
+            dirHandle = await dirHandle.getDirectoryHandle(parts[i], { create: true });
+        }
+
+        const fileHandle = await dirHandle.getFileHandle(parts[parts.length - 1], { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(content);
+        await writable.close();
+    };
+
+    const exportMockBackendBundle = async () => {
+        try {
+            if (typeof window.showDirectoryPicker === 'function') {
+                const selectedDir = await window.showDirectoryPicker({ mode: 'readwrite' });
+                const backendDir = await selectedDir.getDirectoryHandle(MOCK_EXPORT_ROOT, { create: true });
+
+                for (const [path, content] of Object.entries(MOCK_FILES)) {
+                    await writeFileToDirectory(backendDir, path, content);
+                }
+                alert('Mock backend files exported to a backend/ folder.');
+                return;
+            }
+        } catch (error) {
+            if (error?.name === 'AbortError') return;
+            console.warn('Directory export failed, falling back to file downloads:', error);
+        }
+
+        downloadMockFilesIndividually();
+        alert('Downloaded mock backend files individually (directory export not supported in this browser).');
+    };
+
     return (
         <div className="chat-page" data-theme={theme}>
 
@@ -671,6 +843,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                     {threads.map(t => (
                         <div key={t.id} className={`cp-thread-item${activeThread === t.id ? ' active' : ''}`}
                             onClick={() => {
+                                if (editingThreadId === t.id) return;
                                 isGeneratingRef.current = false;
                                 localStorage.setItem('interius_active_thread', t.id);
                                 setIsMessagesLoading(true);
@@ -678,14 +851,47 @@ export default function ChatPage({ theme, onThemeToggle }) {
                             }}
                         >
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M5 6h14M5 12h10M5 18h7" /></svg>
-                            <span className="cp-thread-title">{t.title}</span>
-                            <button
-                                className="cp-thread-delete"
-                                title="Delete thread"
-                                onClick={(e) => handleDeleteThread(e, t.id)}
-                            >
-                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-                            </button>
+                            {editingThreadId === t.id ? (
+                                <>
+                                    <input
+                                        className="cp-thread-edit-input"
+                                        value={editingThreadTitle}
+                                        autoFocus
+                                        onClick={(e) => e.stopPropagation()}
+                                        onChange={(e) => setEditingThreadTitle(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') saveThreadTitle(e, t.id);
+                                            if (e.key === 'Escape') cancelEditThreadTitle(e);
+                                        }}
+                                    />
+                                    <div className="cp-thread-edit-actions" onClick={(e) => e.stopPropagation()}>
+                                        <button className="cp-thread-edit-btn" title="Save thread name" onClick={(e) => saveThreadTitle(e, t.id)}>
+                                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                                        </button>
+                                        <button className="cp-thread-edit-btn" title="Cancel rename" onClick={cancelEditThreadTitle}>
+                                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                                        </button>
+                                    </div>
+                                </>
+                            ) : (
+                                <>
+                                    <span className="cp-thread-title">{t.title}</span>
+                                    <button
+                                        className="cp-thread-rename"
+                                        title="Rename thread"
+                                        onClick={(e) => beginEditThreadTitle(e, t)}
+                                    >
+                                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z" /></svg>
+                                    </button>
+                                    <button
+                                        className="cp-thread-delete"
+                                        title="Delete thread"
+                                        onClick={(e) => handleDeleteThread(e, t.id)}
+                                    >
+                                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                                    </button>
+                                </>
+                            )}
                         </div>
                     ))}
                 </div>
@@ -760,8 +966,27 @@ export default function ChatPage({ theme, onThemeToggle }) {
                     ) : (
                         <div className="cp-messages">
                             <AnimatePresence initial={false}>
-                                {messages.map((msg, i) => (
-                                    <motion.div key={i} className={`cp-msg ${msg.type}`} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }}>
+                                {messages.map((msg, i) => {
+                                    const prevMsg = messages[i - 1];
+                                    const nextMsg = messages[i + 1];
+                                    const assistantIsPipelineAck =
+                                        msg.type === 'assistant' &&
+                                        nextMsg?.type === 'agent';
+                                    const suppressAgentSummaryText =
+                                        msg.type === 'agent' &&
+                                        msg.status === 'completed' &&
+                                        prevMsg?.type === 'assistant';
+                                    const agentPrefaceText =
+                                        msg.type === 'agent' && prevMsg?.type === 'assistant'
+                                            ? prevMsg.text
+                                            : '';
+
+                                    if (assistantIsPipelineAck) {
+                                        return null;
+                                    }
+
+                                    return (
+                                    <motion.div key={msg.id ?? i} className={`cp-msg ${msg.type}`} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }}>
                                         {msg.type === 'user' ? (
                                             <div className="cp-user-msg">
                                                 {msg.files?.length > 0 && (
@@ -776,17 +1001,34 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                                 )}
                                                 {msg.text && <div className="cp-bubble">{msg.text}</div>}
                                             </div>
+                                        ) : msg.type === 'assistant' ? (
+                                            <div className="cp-agent-wrap">
+                                                <div className="cp-agent-avatar">
+                                                    <span className="cp-agent-mini-mark" aria-hidden="true">
+                                                        <span className="cp-agent-mini-i">I</span><span className="cp-agent-mini-dot">.</span>
+                                                    </span>
+                                                </div>
+                                                {msg.text && <div className="cp-bubble cp-assistant-bubble">{msg.text}</div>}
+                                            </div>
                                         ) : (
                                             <div className="cp-agent-wrap">
                                                 <div className="cp-agent-avatar">
-                                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                                                        <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
-                                                    </svg>
+                                                    <span className="cp-agent-mini-mark" aria-hidden="true">
+                                                        <span className="cp-agent-mini-i">I</span><span className="cp-agent-mini-dot">.</span>
+                                                    </span>
                                                 </div>
                                                 <div className="cp-agent-body">
+                                                    {agentPrefaceText && (
+                                                        <div className="cp-agent-preface">
+                                                            {agentPrefaceText}
+                                                        </div>
+                                                    )}
                                                     {/* Thought Process Tree */}
                                                     <div className="cp-thought-process">
-                                                        <details className="cp-thought-details" open>
+                                                        <details
+                                                            className="cp-thought-details"
+                                                            open={msg.isStreaming || msg.status === 'awaiting_approval'}
+                                                        >
                                                             <summary className="cp-thought-summary">
                                                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21" /></svg> View thought process
                                                             </summary>
@@ -896,7 +1138,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                                     {/* Final output block */}
                                                     {msg.status === 'completed' && msg.text && (
                                                         <div className="cp-final-output">
-                                                            <p className="cp-agent-text">{msg.text}</p>
+                                                            {!suppressAgentSummaryText && <p className="cp-agent-text">{msg.text}</p>}
 
                                                             {msg.files?.length > 0 && (
                                                                 <div className="cp-agent-files-group">
@@ -906,6 +1148,22 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                                                             {f}
                                                                         </button>
                                                                     ))}
+                                                                </div>
+                                                            )}
+
+                                                            {msg.status === 'completed' && msg.phase >= 2 && (
+                                                                <div className="cp-export-block">
+                                                                    <div className="cp-deploy-content">
+                                                                        Download the generated mock backend files so you can drop the <code>backend/</code> folder into your project.
+                                                                    </div>
+                                                                    <button className="cp-action-btn cp-action-download" onClick={exportMockBackendBundle}>
+                                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                                                            <polyline points="7 10 12 15 17 10" />
+                                                                            <line x1="12" y1="15" x2="12" y2="3" />
+                                                                        </svg>
+                                                                        Download Backend Files
+                                                                    </button>
                                                                 </div>
                                                             )}
 
@@ -938,7 +1196,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                             </div>
                                         )}
                                     </motion.div>
-                                ))}
+                                );})}
 
 
                             </AnimatePresence>

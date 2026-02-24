@@ -15,15 +15,21 @@ T = TypeVar("T", bound=BaseModel)
 class LLMClient:
     """Provider-agnostic LLM Client for structured generation using the OpenAI API spec."""
 
-    def __init__(self, model_name: str | None = None):
+    def __init__(
+        self,
+        model_name: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ):
         self.model_name = model_name or settings.MODEL_DEFAULT
 
         # Use LLM_API_KEY or fallback to GEMINI_API_KEY if they only provided the original one
-        api_key = settings.LLM_API_KEY or settings.GEMINI_API_KEY
+        resolved_api_key = api_key or settings.LLM_API_KEY or settings.GEMINI_API_KEY
+        resolved_base_url = base_url or settings.LLM_BASE_URL
 
         self.client = AsyncOpenAI(
-            base_url=settings.LLM_BASE_URL,
-            api_key=api_key,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
         )
 
     async def generate_structured(
