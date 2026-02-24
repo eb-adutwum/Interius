@@ -290,8 +290,9 @@ export default function ChatPage({ theme, onThemeToggle }) {
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [selectedModel, setSelectedModel] = useState('pro');
     const [threads, setThreads] = useState([]);
-    const [activeThread, setActiveThread] = useState(null);
+    const [activeThread, setActiveThread] = useState(() => localStorage.getItem('interius_active_thread'));
     const [messages, setMessages] = useState([]);
+    const [isMessagesLoading, setIsMessagesLoading] = useState(() => Boolean(localStorage.getItem('interius_active_thread')));
     const [input, setInput] = useState('');
     const [isTyping, setIsTyping] = useState(false);
     const [typingStep, setTypingStep] = useState(0);
@@ -335,6 +336,10 @@ export default function ChatPage({ theme, onThemeToggle }) {
                 const saved = localStorage.getItem('interius_active_thread');
                 if (saved && data.some(t => t.id === saved)) {
                     setActiveThread(saved);
+                } else if (saved) {
+                    localStorage.removeItem('interius_active_thread');
+                    setActiveThread(null);
+                    setIsMessagesLoading(false);
                 }
             }
         };
@@ -345,16 +350,21 @@ export default function ChatPage({ theme, onThemeToggle }) {
     useEffect(() => {
         if (!activeThread) {
             setMessages([]);
+            setIsMessagesLoading(false);
             return;
         }
 
         if (isGeneratingRef.current) return;
+        let cancelled = false;
+        setIsMessagesLoading(true);
 
         const fetchMessages = async () => {
             const { data } = await supabase.from('messages')
                 .select('*')
                 .eq('thread_id', activeThread)
                 .order('created_at', { ascending: true });
+
+            if (cancelled) return;
 
             if (data) {
                 // Parse the DB rows back into the frontend schema
@@ -377,8 +387,13 @@ export default function ChatPage({ theme, onThemeToggle }) {
                 );
                 setMessages(withMockData);
             }
+            if (!cancelled) setIsMessagesLoading(false);
         };
         fetchMessages();
+
+        return () => {
+            cancelled = true;
+        };
     }, [activeThread]);
 
     const { recording, toggle: toggleRecording } = useVoiceRecorder((text) => {
@@ -588,6 +603,9 @@ export default function ChatPage({ theme, onThemeToggle }) {
         const text = input.trim();
         if ((!text && attachedFiles.length === 0) || pipelineInProgress) return;
         setInput('');
+        if (inputRef.current) {
+            inputRef.current.style.height = 'auto';
+        }
         await sendMessage(text);
     };
 
@@ -654,8 +672,9 @@ export default function ChatPage({ theme, onThemeToggle }) {
                         <div key={t.id} className={`cp-thread-item${activeThread === t.id ? ' active' : ''}`}
                             onClick={() => {
                                 isGeneratingRef.current = false;
+                                localStorage.setItem('interius_active_thread', t.id);
+                                setIsMessagesLoading(true);
                                 setActiveThread(t.id);
-                                setMessages([]);
                             }}
                         >
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M5 6h14M5 12h10M5 18h7" /></svg>
@@ -712,7 +731,12 @@ export default function ChatPage({ theme, onThemeToggle }) {
 
                 {/* Chat area */}
                 <div className="cp-chat-area">
-                    {messages.length === 0 && !isTyping ? (
+                    {isMessagesLoading && activeThread ? (
+                        <div className="cp-chat-loading" role="status" aria-live="polite">
+                            <div className="cp-chat-loading-spinner" />
+                            <span>Loading thread…</span>
+                        </div>
+                    ) : messages.length === 0 && !isTyping ? (
                         <div className="cp-empty">
                             {/* Build icon */}
                             <div className="cp-empty-icon" style={{ fontSize: '44px', fontWeight: 700, lineHeight: 1, letterSpacing: '-0.02em', userSelect: 'none' }}>
