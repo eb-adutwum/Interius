@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     POSTGRES_USER: str
     POSTGRES_PASSWORD: str = ""
     POSTGRES_DB: str = ""
+    POSTGRES_SSLMODE: str = ""
 
     LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
     LLM_API_KEY: str = ""
@@ -70,15 +71,19 @@ class Settings(BaseSettings):
 
     @computed_field  # type: ignore[prop-decorator]
     @property
-    def SQLALCHEMY_DATABASE_URI(self) -> PostgresDsn:
-        return PostgresDsn.build(
+    def SQLALCHEMY_DATABASE_URI(self) -> str:
+        dsn = str(PostgresDsn.build(
             scheme="postgresql+psycopg",
             username=self.POSTGRES_USER,
             password=self.POSTGRES_PASSWORD,
             host=self.POSTGRES_SERVER,
             port=self.POSTGRES_PORT,
             path=self.POSTGRES_DB,
-        )
+        ))
+        if self.POSTGRES_SSLMODE:
+            joiner = "&" if "?" in dsn else "?"
+            dsn = f"{dsn}{joiner}sslmode={self.POSTGRES_SSLMODE}"
+        return dsn
 
     SMTP_TLS: bool = True
     SMTP_SSL: bool = False

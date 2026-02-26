@@ -248,6 +248,13 @@ export function clearThreadFileContext(threadId) {
     window.sessionStorage.removeItem(keyForThread(threadId));
 }
 
+export function copyThreadFileContext(sourceThreadId, targetThreadId) {
+    if (!sourceThreadId || !targetThreadId || sourceThreadId === targetThreadId) return;
+    const files = getThreadFileContext(sourceThreadId);
+    if (!files.length) return;
+    writeStored(targetThreadId, files);
+}
+
 export function clearAllThreadFileContexts() {
     if (!isBrowser()) return;
     const keys = [];

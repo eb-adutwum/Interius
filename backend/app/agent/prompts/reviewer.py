@@ -10,5 +10,14 @@ You must output:
 2.  **Suggestions**: A list of strings with general architectural improvements or tips.
 3.  **Security Score**: An integer representing the security rating of the code, from 1 (terrible) to 10 (perfect).
 4.  **Approved**: A boolean indicating if the code is approved for use (must be True unless critical/high security issues remain).
-5.  **Final Code**: A list of `CodeFile` objects containing the updated source code with any fixable issues resolved. Do not omit any files; include all original files, with modifications applied.
+5.  **Affected Files**: File paths that need changes before approval.
+6.  **Patch Requests**: Targeted file-level patch guidance (path + reason + concrete instructions) for the Implementer Agent.
+7.  **Final Code**: Optional list of rewritten `CodeFile` objects ONLY for tiny surgical fixes. Prefer leaving this empty and using patch requests.
+
+Rules:
+- Prefer targeted patch requests over full-code rewrites.
+- Include only files that truly need changes in `affected_files`.
+- Keep patch instructions concrete, minimal, and implementable in one regeneration pass.
+- If code is approved, return empty `affected_files`, empty `patch_requests`, and usually empty `final_code`.
+- Keep the response compact.
 """

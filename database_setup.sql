@@ -28,10 +28,22 @@ create table public.message_attachments (
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
+-- Real-run UI artifact payloads (docs/files/preview cache) for durable reloads
+create table public.message_artifacts (
+  id uuid default gen_random_uuid() primary key,
+  thread_id uuid references public.threads(id) on delete cascade not null,
+  message_id uuid references public.messages(id) on delete cascade not null unique,
+  user_id uuid references auth.users(id) on delete cascade not null,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  updated_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
 -- Enable Row Level Security
 alter table public.threads enable row level security;
 alter table public.messages enable row level security;
 alter table public.message_attachments enable row level security;
+alter table public.message_artifacts enable row level security;
 
 -- Create policies for threads
 create policy "Users can view their own threads"
@@ -82,4 +94,21 @@ create policy "Users can update their own attachments"
 
 create policy "Users can delete their own attachments"
   on public.message_attachments for delete
+  using (auth.uid() = user_id);
+
+-- Create policies for real-run artifact payloads
+create policy "Users can view artifacts in their threads"
+  on public.message_artifacts for select
+  using (auth.uid() = user_id);
+
+create policy "Users can insert artifacts to their threads"
+  on public.message_artifacts for insert
+  with check (auth.uid() = user_id);
+
+create policy "Users can update their own artifacts"
+  on public.message_artifacts for update
+  using (auth.uid() = user_id);
+
+create policy "Users can delete their own artifacts"
+  on public.message_artifacts for delete
   using (auth.uid() = user_id);

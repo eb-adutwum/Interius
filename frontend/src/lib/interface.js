@@ -72,6 +72,13 @@ export function clearInterfaceThreadContext(threadId) {
     window.sessionStorage.removeItem(storageKey(threadId));
 }
 
+export function copyInterfaceThreadContext(sourceThreadId, targetThreadId) {
+    if (!sourceThreadId || !targetThreadId || sourceThreadId === targetThreadId) return;
+    const messages = getInterfaceThreadContext(sourceThreadId);
+    if (!messages.length) return;
+    writeInterfaceThreadContext(targetThreadId, messages);
+}
+
 export function clearAllInterfaceThreadContexts() {
     if (typeof window === 'undefined') return;
     const keys = [];

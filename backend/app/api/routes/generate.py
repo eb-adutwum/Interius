@@ -1,10 +1,12 @@
 import json
 import logging
 import uuid
+from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlmodel import Session
+from sqlalchemy.exc import OperationalError
+from sqlmodel import Session, select
 from sse_starlette.sse import EventSourceResponse
 
 from app.agent.interface import (
@@ -13,19 +15,447 @@ from app.agent.interface import (
     InterfaceContextMessage,
     InterfaceDecision,
 )
+from app.agent.artifacts import ProjectCharter, SystemArchitecture
 from app.agent.orchestrator import run_pipeline_generator
 from app.api.deps import CurrentUser, get_db
-from app.crud import create_generation_run
-from app.models import GenerationRunCreate
+from app.core.config import settings
+from app.crud import create_generation_run, create_project, create_user, get_user_by_email
+from app.models import GenerationRunCreate, Project, ProjectCreate, User, UserCreate
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+GENERATION_RUN_PROMPT_MAX_CHARS = 5000
 
 
 class InterfacePromptRequest(BaseModel):
     prompt: str
     recent_messages: list[InterfaceContextMessage] = Field(default_factory=list)
     attachment_summaries: list[InterfaceAttachmentSummary] = Field(default_factory=list)
+
+
+class ThreadContextFile(BaseModel):
+    filename: str
+    mime_type: str | None = None
+    size_bytes: int | None = None
+    has_text_content: bool = False
+    text_content: str | None = None
+
+
+class ChatGenerateStreamRequest(BaseModel):
+    prompt: str
+    recent_messages: list[InterfaceContextMessage] = Field(default_factory=list)
+    attachment_summaries: list[InterfaceAttachmentSummary] = Field(default_factory=list)
+    thread_context_files: list[ThreadContextFile] = Field(default_factory=list)
+    stop_after_architecture: bool = False
+    resume_from_stage: str | None = None  # currently supports "post_architecture"
+    approved_requirements_artifact: dict[str, Any] | None = None
+    approved_architecture_artifact: dict[str, Any] | None = None
+
+
+def _charter_to_markdown(artifact: dict[str, Any]) -> str:
+    project_name = artifact.get("project_name") or "Project"
+    description = artifact.get("description") or ""
+    auth_required = artifact.get("auth_required")
+    entities = artifact.get("entities") or []
+    endpoints = artifact.get("endpoints") or []
+    business_rules = artifact.get("business_rules") or []
+
+    lines: list[str] = [f"# Requirements Document: {project_name}", ""]
+    if description:
+        lines += [description, ""]
+
+    if auth_required is not None:
+        lines += [f"**Authentication required:** {'Yes' if auth_required else 'No'}", ""]
+
+    lines += ["## Entities", ""]
+    if entities:
+        for entity in entities:
+            lines.append(f"### {entity.get('name', 'Entity')}")
+            fields = entity.get("fields") or []
+            if not fields:
+                lines.append("- No fields extracted")
+            for fld in fields:
+                req = "required" if fld.get("required") else "optional"
+                lines.append(
+                    f"- `{fld.get('name', 'field')}`: `{fld.get('field_type', 'unknown')}` ({req})"
+                )
+            lines.append("")
+    else:
+        lines += ["- No entities extracted", ""]
+
+    lines += ["## Endpoints", ""]
+    if endpoints:
+        for ep in endpoints:
+            lines.append(
+                f"- **{ep.get('method', 'GET')}** `{ep.get('path', '/')}` - {ep.get('description', '')}"
+            )
+    else:
+        lines.append("- No endpoints extracted")
+    lines.append("")
+
+    if business_rules:
+        lines += ["## Business Rules", ""]
+        lines.extend([f"- {rule}" for rule in business_rules])
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def _build_context_block(thread_context_files: list[ThreadContextFile]) -> str:
+    usable = [f for f in thread_context_files if f.has_text_content and (f.text_content or "").strip()]
+    if not usable:
+        return ""
+
+    sections: list[str] = [
+        "Attached Thread Context Files (use as supporting requirements context):",
+    ]
+    for file in usable[:5]:
+        content = (file.text_content or "").strip()
+        if not content:
+            continue
+        sections += [
+            f"\n[File: {file.filename}]",
+            content[:12000],
+        ]
+    return "\n".join(sections).strip()
+
+
+def _ui_event(event: str, **payload: Any) -> str:
+    return json.dumps({"status": event, **payload})
+
+
+def _chat_thread_project_marker(thread_id: str) -> str:
+    return f"[chat-thread:{thread_id}]"
+
+
+def _truncate_prompt_for_generation_run(prompt: str) -> str:
+    text = (prompt or "").strip()
+    if len(text) <= GENERATION_RUN_PROMPT_MAX_CHARS:
+        return text
+    suffix = "\n\n[truncated for run record]"
+    keep = max(0, GENERATION_RUN_PROMPT_MAX_CHARS - len(suffix))
+    return text[:keep].rstrip() + suffix
+
+
+def _derive_project_name_from_prompt(prompt: str, thread_id: str) -> str:
+    text = (prompt or "").strip()
+    if not text:
+        return f"Chat Thread {thread_id[:8]}"
+    cleaned = " ".join(text.split())
+    return (cleaned[:80]).strip() or f"Chat Thread {thread_id[:8]}"
+
+
+def _resolve_or_create_project_for_thread(
+    session: Session,
+    current_user: Any,
+    thread_id: str,
+    prompt: str,
+) -> uuid.UUID:
+    marker = _chat_thread_project_marker(thread_id)
+    existing = session.exec(
+        select(Project).where(
+            Project.owner_id == current_user.id,
+            Project.description == marker,
+        )
+    ).first()
+    if existing:
+        return existing.id
+
+    project = create_project(
+        session=session,
+        project_in=ProjectCreate(
+            name=_derive_project_name_from_prompt(prompt, thread_id),
+            description=marker,
+        ),
+        owner_id=current_user.id,
+    )
+    return project.id
+
+
+def _get_or_create_chat_bridge_user(session: Session) -> User:
+    """
+    Temporary UI bridge:
+    the chat frontend currently authenticates with Supabase, not backend JWTs.
+    For the thread-chat streaming endpoint, use a stable backend user so the UI
+    can exercise the real orchestrator path without backend token wiring yet.
+    """
+    existing = get_user_by_email(session=session, email=str(settings.FIRST_SUPERUSER))
+    if existing:
+        return existing
+
+    return create_user(
+        session=session,
+        user_create=UserCreate(
+            email=str(settings.FIRST_SUPERUSER),
+            password=settings.FIRST_SUPERUSER_PASSWORD,
+            is_active=True,
+            is_superuser=True,
+            full_name="Interius Chat Bridge",
+        ),
+    )
+
+
+async def run_interface_then_pipeline_ui_stream(
+    session: Session,
+    project_id: uuid.UUID,
+    payload: ChatGenerateStreamRequest,
+):
+    """
+    UI-first streaming wrapper.
+    Emits normalized events that map cleanly to the current ChatPage renderer:
+    progress stages + requirements/architecture docs + generated files + final summary.
+    """
+    prompt = payload.prompt
+    routed_prompt = prompt
+    decision = None
+
+    is_resume_from_architecture = (payload.resume_from_stage or "").strip().lower() == "post_architecture"
+    approved_charter_obj: ProjectCharter | None = None
+    approved_arch_obj: SystemArchitecture | None = None
+
+    if is_resume_from_architecture:
+        try:
+            if not payload.approved_architecture_artifact:
+                raise ValueError("Missing approved architecture artifact for resume")
+            approved_arch_obj = SystemArchitecture.model_validate(payload.approved_architecture_artifact)
+            if payload.approved_requirements_artifact:
+                approved_charter_obj = ProjectCharter.model_validate(payload.approved_requirements_artifact)
+            yield _ui_event(
+                "intent_routed",
+                intent="resume_pipeline",
+                trigger_pipeline=True,
+                message="Interius is resuming generation from the approved architecture.",
+            )
+        except Exception as exc:
+            yield _ui_event("error", message=f"Unable to resume from approval checkpoint: {exc}")
+            return
+
+    if not is_resume_from_architecture:
+        try:
+            decision = await InterfaceAgent().run(
+                prompt,
+                recent_messages=payload.recent_messages,
+                attachment_summaries=payload.attachment_summaries,
+            )
+            if not decision.should_trigger_pipeline:
+                yield _ui_event(
+                    "chat_reply",
+                    intent=decision.intent,
+                    trigger_pipeline=False,
+                    message=decision.assistant_reply,
+                )
+                yield _ui_event(
+                    "completed",
+                    mode="chat_only",
+                    trigger_pipeline=False,
+                )
+                return
+
+            routed_prompt = decision.pipeline_prompt or prompt
+            yield _ui_event(
+                "intent_routed",
+                intent=decision.intent,
+                trigger_pipeline=True,
+                message=decision.assistant_reply,
+            )
+        except Exception as exc:
+            logger.warning("Interface agent failed in UI stream; proceeding directly to pipeline: %s", exc)
+            yield _ui_event(
+                "intent_routed",
+                intent="fallback_pipeline",
+                trigger_pipeline=True,
+                message="Interius is starting generation for your request.",
+            )
+
+    context_block = _build_context_block(payload.thread_context_files)
+    pipeline_prompt = f"{routed_prompt}\n\n{context_block}".strip() if context_block else routed_prompt
+
+    run = create_generation_run(
+        session=session,
+        run_in=GenerationRunCreate(
+            project_id=project_id,
+            prompt=_truncate_prompt_for_generation_run(pipeline_prompt),
+        ),
+    )
+
+    captured: dict[str, Any] = {
+        "requirements": None,
+        "architecture": None,
+        "code_files": None,
+        "dependencies": None,
+        "review": None,
+    }
+
+    stage_map = {
+        "requirements": ("requirements", 1, "req"),
+        "architecture": ("architecture", 1, "arch"),
+        "implementer": ("implementer", 2, "code"),
+        "reviewer": ("reviewer", 2, "review"),
+        "tester": ("tester", 2, "review"),
+    }
+
+    async for raw_event in run_pipeline_generator(
+        session,
+        project_id,
+        run.id,
+        pipeline_prompt,
+        charter_override=approved_charter_obj,
+        architecture_override=approved_arch_obj,
+        start_stage="implementer" if is_resume_from_architecture else "requirements",
+    ):
+        try:
+            event = json.loads(raw_event)
+        except Exception:
+            yield _ui_event("error", message="Invalid pipeline event received")
+            continue
+
+        status = event.get("status")
+
+        if status == "starting":
+            yield _ui_event("run_started", message=event.get("message", "Initializing pipeline..."))
+            continue
+
+        if status in stage_map:
+            stage, phase, step = stage_map[status]
+            yield _ui_event(
+                "stage_started",
+                stage=stage,
+                phase=phase,
+                step=step,
+                message=event.get("message"),
+            )
+            continue
+
+        if status == "requirements_done":
+            artifact = event.get("artifact") or {}
+            captured["requirements"] = artifact
+            yield _ui_event("stage_completed", stage="requirements", phase=1, step="req")
+            yield _ui_event(
+                "artifact_requirements",
+                artifact=artifact,
+                preview_file={
+                    "path": "Requirements Document.md",
+                    "content": _charter_to_markdown(artifact),
+                },
+            )
+            continue
+
+        if status == "architecture_done":
+            artifact = event.get("artifact") or {}
+            captured["architecture"] = artifact
+            design_doc = artifact.get("design_document") or "# Architecture Design\n\nNo design document provided."
+            mermaid_diagram = (artifact.get("mermaid_diagram") or "").strip()
+            yield _ui_event("stage_completed", stage="architecture", phase=1, step="arch")
+            architecture_event_payload: dict[str, Any] = {
+                "artifact": artifact,
+                "preview_file": {
+                    "path": "Architecture Design.md",
+                    "content": design_doc,
+                },
+            }
+            if mermaid_diagram:
+                architecture_event_payload["diagram_file"] = {
+                    "path": "Architecture Diagram.mmd",
+                    "content": mermaid_diagram,
+                }
+            yield _ui_event("artifact_architecture", **architecture_event_payload)
+            if payload.stop_after_architecture:
+                req = captured.get("requirements") or {}
+                project_name = req.get("project_name") or "backend"
+                yield _ui_event(
+                    "awaiting_approval",
+                    mode="pipeline",
+                    trigger_pipeline=True,
+                    message="Requirements and architecture are ready for your approval.",
+                    summary=f"Interius prepared requirements and architecture artifacts for {project_name}.",
+                    requirements_artifact=captured.get("requirements"),
+                    architecture_artifact=captured.get("architecture"),
+                )
+                return
+            continue
+
+        if status == "implementer_done":
+            artifact = event.get("artifact") or {}
+            files = artifact.get("files") or []
+            dependencies = artifact.get("dependencies") or []
+            captured["code_files"] = files
+            captured["dependencies"] = dependencies
+            yield _ui_event("stage_completed", stage="implementer", phase=2, step="code")
+            yield _ui_event(
+                "artifact_files",
+                files=files,
+                dependencies=dependencies,
+                files_count=event.get("files_count", len(files)),
+            )
+            continue
+
+        if status == "revision":
+            yield _ui_event(
+                "review_update",
+                kind="revision",
+                message=event.get("message"),
+                attempt=event.get("attempt"),
+                issues_count=event.get("issues_count"),
+                affected_files=event.get("affected_files") or [],
+            )
+            continue
+
+        if status == "reviewer_done":
+            review_artifact = event.get("artifact") or {}
+            captured["review"] = review_artifact
+            yield _ui_event("stage_completed", stage="reviewer", phase=2, step="review")
+            yield _ui_event(
+                "review_update",
+                kind="completed",
+                message=event.get("message"),
+                artifact=review_artifact,
+            )
+            continue
+
+        if status == "tester_done":
+            yield _ui_event("stage_completed", stage="tester", phase=2, step="review")
+            yield _ui_event(
+                "review_update",
+                kind="tests",
+                message=event.get("message"),
+                artifact=event.get("artifact") or {},
+                affected_files=[
+                    req.get("path")
+                    for req in ((event.get("artifact") or {}).get("patch_requests") or [])
+                    if isinstance(req, dict) and req.get("path")
+                ],
+            )
+            continue
+
+        if status == "completed":
+            req = captured.get("requirements") or {}
+            project_name = req.get("project_name") or "backend"
+            endpoints = req.get("endpoints") or []
+            files = captured.get("code_files") or []
+            summary = (
+                f"Interius generated a backend scaffold for {project_name} "
+                f"with {len(endpoints)} endpoint(s) and {len(files)} file(s)."
+            )
+            yield _ui_event(
+                "completed",
+                mode="pipeline",
+                trigger_pipeline=True,
+                message=event.get("message"),
+                summary=summary,
+                final_artifact=event.get("artifact"),
+                requirements_artifact=captured.get("requirements"),
+                architecture_artifact=captured.get("architecture"),
+                files=captured.get("code_files") or [],
+                dependencies=captured.get("dependencies") or [],
+            )
+            continue
+
+        if status == "error":
+            yield _ui_event("error", message=event.get("message", "Pipeline failed"))
+            continue
+
+        # Forward unknown events for debugging/adaptation without breaking the stream.
+        yield _ui_event("debug_event", raw=event)
 
 
 @router.post("/interface", response_model=InterfaceDecision)
@@ -105,7 +535,10 @@ async def run_interface_then_pipeline_generator(
 
     run = create_generation_run(
         session=session,
-        run_in=GenerationRunCreate(project_id=project_id, prompt=routed_prompt),
+        run_in=GenerationRunCreate(
+            project_id=project_id,
+            prompt=_truncate_prompt_for_generation_run(routed_prompt),
+        ),
     )
 
     async for event in run_pipeline_generator(session, project_id, run.id, routed_prompt):
@@ -123,4 +556,51 @@ async def generate_pipeline(
 
     return EventSourceResponse(
         run_interface_then_pipeline_generator(session, project_id, prompt)
+    )
+
+
+@router.post("/{project_id}/chat")
+async def generate_pipeline_for_chat_ui(
+    project_id: uuid.UUID,
+    payload: ChatGenerateStreamRequest,
+    session: Session = Depends(get_db),
+    current_user: CurrentUser = None,
+):
+    """
+    UI-first chat generation stream.
+    Emits normalized SSE events for the current ChatPage renderer (progress + docs + files).
+    """
+    return EventSourceResponse(
+        run_interface_then_pipeline_ui_stream(session, project_id, payload)
+    )
+
+
+@router.post("/thread/{thread_id}/chat")
+async def generate_pipeline_for_chat_thread(
+    thread_id: str,
+    payload: ChatGenerateStreamRequest,
+    session: Session = Depends(get_db),
+):
+    """
+    UI-facing chat generation endpoint keyed by chat thread ID instead of backend project ID.
+
+    Backend resolves/creates a project internally and reuses it for subsequent runs in the same thread.
+    """
+    try:
+        current_user = _get_or_create_chat_bridge_user(session)
+
+        project_id = _resolve_or_create_project_for_thread(
+            session=session,
+            current_user=current_user,
+            thread_id=thread_id,
+            prompt=payload.prompt,
+        )
+    except OperationalError as exc:
+        logger.error("DB unavailable while starting thread chat pipeline: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Database connection unavailable. Please retry in a moment.",
+        ) from exc
+    return EventSourceResponse(
+        run_interface_then_pipeline_ui_stream(session, project_id, payload)
     )

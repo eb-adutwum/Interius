@@ -1,4 +1,4 @@
-from typing import Literal, Any
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -30,30 +30,42 @@ class ProjectCharter(BaseModel):
     auth_required: bool = Field(description="Whether the API requires authentication")
 
 
-class DBModelSpec(BaseModel):
-    table_name: str
-    columns: list[dict[str, Any]]  # list of {"name": "id", "type": "uuid.UUID", "primary_key": True}
-    relationships: list[dict[str, Any]]
-
-
-class EndpointSpec(BaseModel):
-    method: str
-    path: str
-    description: str
-    request_schema: str | None
-    response_schema: str | None
-
-
 class SystemArchitecture(BaseModel):
-    """Artifact produced by the Architecture Agent."""
-    design_document: str = Field(description="A detailed Markdown-formatted design document explaining the system architecture, design decisions, and patterns to build a robust application")
-    db_models: list[DBModelSpec] = Field(description="Specifications for SQLModel classes")
-    endpoint_specs: list[EndpointSpec] = Field(description="Detailed API contracts")
+    """Lightweight artifact produced by the Architecture Agent for UI rendering + implementer guidance."""
+    design_document: str = Field(
+        description="Markdown-formatted architecture design document."
+    )
+    mermaid_diagram: str = Field(
+        description="Mermaid diagram code representing the high-level architecture. Return only Mermaid syntax, no markdown fence."
+    )
+    components: list[str] = Field(
+        default_factory=list,
+        description="Short bullet-style component summaries (e.g., API layer, auth service, repositories).",
+    )
+    data_model_summary: list[str] = Field(
+        default_factory=list,
+        description="Compact summaries of entities/tables and key relationships.",
+    )
+    endpoint_summary: list[str] = Field(
+        default_factory=list,
+        description="Compact summaries of the main endpoint groups and responsibilities.",
+    )
 
 
 class CodeFile(BaseModel):
     path: str = Field(description="Relative path of the file to create/update like 'app/models.py'")
     content: str = Field(description="Complete source code of the file")
+
+
+class PlannedCodeFile(BaseModel):
+    path: str = Field(description="Relative file path to generate, e.g. 'app/main.py'")
+    purpose: str = Field(description="Short description of what the file contains")
+
+
+class CodeGenerationPlan(BaseModel):
+    """Small structured plan used before per-file generation to avoid giant JSON-with-code payloads."""
+    files: list[PlannedCodeFile] = Field(description="Files to generate for the backend scaffold")
+    dependencies: list[str] = Field(description="Pip packages required by the generated code")
 
 
 class GeneratedCode(BaseModel):
@@ -69,10 +81,49 @@ class Issue(BaseModel):
     line_number: int | None = None
 
 
+class FilePatchRequest(BaseModel):
+    path: str = Field(description="Relative file path to patch, e.g. 'app/routes.py'")
+    reason: str = Field(description="Why this file needs changes")
+    instructions: list[str] = Field(
+        default_factory=list,
+        description="Concrete edit instructions for regenerating this file",
+    )
+
+
 class ReviewReport(BaseModel):
     """Artifact produced by the Reviewer Agent."""
     issues: list[Issue] = Field(description="Issues found during code review")
     suggestions: list[str] = Field(description="Actionable suggestions for improvement")
     security_score: int = Field(ge=1, le=10, description="Security score from 1 to 10")
     approved: bool = Field(description="Whether the code is approved for use")
-    final_code: list[CodeFile] = Field(description="Final modified code with fixes applied")
+    affected_files: list[str] = Field(
+        default_factory=list,
+        description="File paths that need changes before approval.",
+    )
+    patch_requests: list[FilePatchRequest] = Field(
+        default_factory=list,
+        description="Targeted file patch requests for the implementer. Prefer this over rewriting full code.",
+    )
+    final_code: list[CodeFile] = Field(
+        default_factory=list,
+        description="Optional rewritten files. Prefer leaving empty and using patch_requests unless only a tiny fix is needed."
+    )
+
+
+class TestFailure(BaseModel):
+    check: Literal["syntax", "import_smoke"]
+    message: str
+    file_path: str | None = None
+    line_number: int | None = None
+    patchable: bool = True
+
+
+class TestRunReport(BaseModel):
+    passed: bool = Field(description="Whether all blocking test checks passed")
+    checks_run: list[str] = Field(default_factory=list, description="Deterministic checks executed")
+    failures: list[TestFailure] = Field(default_factory=list, description="Blocking test failures")
+    warnings: list[str] = Field(default_factory=list, description="Non-blocking warnings (e.g., missing external deps)")
+    patch_requests: list[FilePatchRequest] = Field(
+        default_factory=list,
+        description="Targeted file patch requests derived from deterministic test failures",
+    )
