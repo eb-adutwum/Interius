@@ -687,6 +687,66 @@
     color: var(--text-primary);
 }
 
+.cp-chat-markdown {
+    white-space: normal;
+}
+
+.cp-chat-md-paragraph,
+.cp-chat-md-list {
+    margin: 0 0 0.85rem;
+    white-space: pre-wrap;
+}
+
+.cp-chat-md-paragraph:last-child,
+.cp-chat-md-list:last-child,
+.cp-chat-code-block:last-child {
+    margin-bottom: 0;
+}
+
+.cp-chat-md-list {
+    padding-left: 1.25rem;
+}
+
+.cp-chat-md-item + .cp-chat-md-item {
+    margin-top: 0.3rem;
+}
+
+.cp-chat-inline-code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    padding: 0.02rem 0.2rem;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--bg-card) 72%, transparent);
+    color: var(--text-primary);
+}
+
+.cp-chat-code-block {
+    margin: 0 0 0.9rem;
+    padding: 0.8rem 0.95rem;
+    overflow-x: auto;
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+}
+
+.cp-chat-block-code {
+    font-family: var(--font-mono);
+    font-size: 0.93em;
+    line-height: 1.65;
+    white-space: pre;
+    color: var(--text-primary);
+}
+
+.cp-chat-markdown .katex-display {
+    margin: 0.8rem 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+.cp-chat-markdown .katex {
+    font-size: 1em;
+}
+
 .cp-attached-files {
     display: flex;
     flex-wrap: wrap;

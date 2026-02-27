@@ -3,6 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import { useAuth } from '../context/AuthContext';
 import ThemeToggle from '../components/ThemeToggle';
 import { supabase } from '../lib/supabase';
@@ -163,6 +166,7 @@ const MOCK_EXPORT_ROOT = 'backend';
 const THREAD_UI_CACHE_PREFIX = 'interius_thread_ui_cache:';
 const THREAD_UI_CACHE_TTL_MS = 30 * 60 * 1000;
 const TEMP_STOP_AFTER_ARCHITECTURE = false; // Set true only when isolating requirements+architecture for diagram debugging.
+const CHAT_MARKDOWN_ALLOWED_ELEMENTS = ['p', 'br', 'strong', 'em', 'del', 'code', 'pre', 'ul', 'ol', 'li', 'a', 'math', 'inlineMath'];
 
 function threadUiCacheKey(threadId) {
     return `${THREAD_UI_CACHE_PREFIX}${threadId}`;
@@ -237,6 +241,58 @@ function clearAllThreadUiCaches() {
             }
         });
     }
+}
+
+function ChatMessageMarkdown({ text, className }) {
+    if (!text) return null;
+
+    return (
+        <div className={className}>
+            <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkMath]}
+                rehypePlugins={[rehypeKatex]}
+                allowedElements={CHAT_MARKDOWN_ALLOWED_ELEMENTS}
+                unwrapDisallowed
+                components={{
+                    p({ children }) {
+                        return <p className="cp-chat-md-paragraph">{children}</p>;
+                    },
+                    ul({ children }) {
+                        return <ul className="cp-chat-md-list">{children}</ul>;
+                    },
+                    ol({ children }) {
+                        return <ol className="cp-chat-md-list cp-chat-md-list-numbered">{children}</ol>;
+                    },
+                    li({ children }) {
+                        return <li className="cp-chat-md-item">{children}</li>;
+                    },
+                    a({ children, ...props }) {
+                        return <a className="cp-tree-link" target="_blank" rel="noreferrer" {...props}>{children}</a>;
+                    },
+                    code({ inline, children, ...props }) {
+                        if (inline) {
+                            return (
+                                <code className="cp-chat-inline-code" {...props}>
+                                    {children}
+                                </code>
+                            );
+                        }
+
+                        return (
+                            <code className="cp-chat-block-code" {...props}>
+                                {children}
+                            </code>
+                        );
+                    },
+                    pre({ children }) {
+                        return <pre className="cp-chat-code-block">{children}</pre>;
+                    },
+                }}
+            >
+                {text}
+            </ReactMarkdown>
+        </div>
+    );
 }
 
 function buildPreviewMapFromEntries(entries) {
@@ -2866,7 +2922,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                                         <span className="cp-agent-mini-i">I</span><span className="cp-agent-mini-dot">.</span>
                                                     </span>
                                                 </div>
-                                                {msg.text && <div className="cp-bubble cp-assistant-bubble">{msg.text}</div>}
+                                                {msg.text && <ChatMessageMarkdown className="cp-bubble cp-assistant-bubble cp-chat-markdown" text={msg.text} />}
                                             </div>
                                         ) : (
                                             <div className="cp-agent-wrap">
@@ -3042,7 +3098,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                                     {/* Final output block */}
                                                     {msg.status === 'completed' && msg.text && (
                                                         <div className="cp-final-output">
-                                                            {!suppressAgentSummaryText && <p className="cp-agent-text">{msg.text}</p>}
+                                                            {!suppressAgentSummaryText && <ChatMessageMarkdown className="cp-agent-text cp-chat-markdown" text={msg.text} />}
 
                                                             {nonCodeArtifacts.length > 0 && (
                                                                 <div className="cp-agent-artifact-section">
