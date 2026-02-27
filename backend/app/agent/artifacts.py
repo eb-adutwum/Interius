@@ -33,22 +33,22 @@ class ProjectCharter(BaseModel):
 class SystemArchitecture(BaseModel):
     """Lightweight artifact produced by the Architecture Agent for UI rendering + implementer guidance."""
     design_document: str = Field(
-        description="Markdown-formatted architecture design document."
+        description="Markdown-formatted backend architecture design document focused on request flow, backend components, persistence, auth, and entrypoints."
     )
     mermaid_diagram: str = Field(
-        description="Mermaid diagram code representing the high-level architecture. Return only Mermaid syntax, no markdown fence."
+        description="Mermaid diagram code representing the high-level backend runtime architecture and component interactions. Return only Mermaid syntax, no markdown fence."
     )
     components: list[str] = Field(
         default_factory=list,
-        description="Short bullet-style component summaries (e.g., API layer, auth service, repositories).",
+        description="Short bullet-style summaries of backend components and responsibilities (e.g., API entrypoint, routers, services, auth dependencies, repositories, database session handling).",
     )
     data_model_summary: list[str] = Field(
         default_factory=list,
-        description="Compact summaries of entities/tables and key relationships.",
+        description="Compact summaries of backend entities/tables and key relationships relevant to persistence and request handling.",
     )
     endpoint_summary: list[str] = Field(
         default_factory=list,
-        description="Compact summaries of the main endpoint groups and responsibilities.",
+        description="Compact summaries of the main backend endpoint groups, handlers, and responsibilities.",
     )
 
 

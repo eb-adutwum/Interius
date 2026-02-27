@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -102,6 +103,104 @@ def _charter_to_markdown(artifact: dict[str, Any]) -> str:
         lines.append("")
 
     return "\n".join(lines).strip()
+
+
+def _slug_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", (value or "").strip().lower()).strip("_")
+
+
+def _candidate_entity_keys(value: str) -> list[str]:
+    slug = _slug_name(value)
+    if not slug:
+        return []
+
+    keys = [slug]
+    if slug.endswith("ies") and len(slug) > 3:
+        keys.append(f"{slug[:-3]}y")
+    if slug.endswith("s") and len(slug) > 1:
+        keys.append(slug[:-1])
+    else:
+        keys.append(f"{slug}s")
+    return list(dict.fromkeys(k for k in keys if k))
+
+
+def _build_schema_visualizer_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+    entities = artifact.get("entities") or []
+    project_name = artifact.get("project_name") or "Project"
+
+    entity_lookup: dict[str, str] = {}
+    tables: list[dict[str, Any]] = []
+
+    for entity in entities:
+        table_name = str(entity.get("name") or "Entity").strip() or "Entity"
+        for key in _candidate_entity_keys(table_name):
+            entity_lookup.setdefault(key, table_name)
+
+    relationships: list[dict[str, Any]] = []
+    seen_relationships: set[tuple[str, str, str, str]] = set()
+
+    for entity in entities:
+        table_name = str(entity.get("name") or "Entity").strip() or "Entity"
+        fields = entity.get("fields") or []
+        columns: list[dict[str, Any]] = []
+
+        for field in fields:
+            field_name = str(field.get("name") or "field").strip() or "field"
+            field_type = str(field.get("field_type") or "unknown").strip() or "unknown"
+            required = bool(field.get("required", True))
+            field_slug = _slug_name(field_name)
+            is_primary_key = field_slug == "id"
+
+            foreign_key: dict[str, str] | None = None
+            if field_slug.endswith("_id") and field_slug != "id":
+                target_key = field_slug[:-3]
+                target_table = entity_lookup.get(target_key)
+                if target_table and target_table != table_name:
+                    foreign_key = {"table": target_table, "column": "id"}
+                    rel_key = (table_name, field_name, target_table, "id")
+                    if rel_key not in seen_relationships:
+                        relationships.append(
+                            {
+                                "from_table": table_name,
+                                "from_column": field_name,
+                                "to_table": target_table,
+                                "to_column": "id",
+                                "kind": "many-to-one",
+                            }
+                        )
+                        seen_relationships.add(rel_key)
+
+            columns.append(
+                {
+                    "name": field_name,
+                    "type": field_type,
+                    "nullable": not required,
+                    "is_primary_key": is_primary_key,
+                    "foreign_key": foreign_key,
+                }
+            )
+
+        if columns and not any(col.get("is_primary_key") for col in columns):
+            inferred_pk = next(
+                (col for col in columns if _slug_name(str(col.get("name") or "")) == f"{_slug_name(table_name)}_id"),
+                None,
+            )
+            if inferred_pk:
+                inferred_pk["is_primary_key"] = True
+
+        tables.append(
+            {
+                "name": table_name,
+                "columns": columns,
+            }
+        )
+
+    return {
+        "version": 1,
+        "title": f"{project_name} ER Diagram",
+        "tables": tables,
+        "relationships": relationships,
+    }
 
 
 def _build_context_block(thread_context_files: list[ThreadContextFile]) -> str:
@@ -396,6 +495,7 @@ async def run_interface_then_pipeline_ui_stream(
         if status == "requirements_done":
             artifact = event.get("artifact") or {}
             captured["requirements"] = artifact
+            schema_artifact = _build_schema_visualizer_artifact(artifact)
             yield _ui_event("stage_completed", stage="requirements", phase=1, step="req")
             yield _ui_event(
                 "artifact_requirements",
@@ -403,6 +503,10 @@ async def run_interface_then_pipeline_ui_stream(
                 preview_file={
                     "path": "Requirements Document.md",
                     "content": _charter_to_markdown(artifact),
+                },
+                schema_file={
+                    "path": "ER Diagram.schema.json",
+                    "content": json.dumps(schema_artifact, indent=2),
                 },
             )
             continue

@@ -22,6 +22,11 @@ Interius uses `uv` for python dependency management. Ensure PostgreSQL is runnin
    uv sync
    ```
 
+   If you are not using `uv`, use the curated fallback requirements file instead of a frozen environment export:
+   ```bash
+   python -m pip install -r requirements.txt
+   ```
+
 2. Generate the local DB schemas (if not already managed by the prestart script):
    ```bash
    uv run alembic upgrade head

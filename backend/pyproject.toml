@@ -23,6 +23,7 @@ dependencies = [
     "pypdf>=5.0.0",
     "google-generativeai>=0.8.6",
     "openai>=2.21.0",
+    "sentry-sdk>=2.0.0",
 ]
 
 [dependency-groups]

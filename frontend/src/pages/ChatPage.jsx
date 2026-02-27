@@ -907,6 +907,181 @@ function MermaidPreview({ code, theme }) {
         />
     );
 }
+
+function isSchemaVisualizerPreview(filename) {
+    return String(filename || '').toLowerCase().endsWith('.schema.json');
+}
+
+function isArtifactPreviewFile(filename) {
+    if (!filename) return false;
+    const lower = String(filename).toLowerCase();
+    return lower.endsWith('.md') || lower.endsWith('.mmd') || lower.endsWith('.schema.json');
+}
+
+function parseSchemaVisualizerContent(content) {
+    try {
+        const raw = JSON.parse(String(content || '{}'));
+        const tables = Array.isArray(raw?.tables) ? raw.tables : [];
+        const relationships = Array.isArray(raw?.relationships) ? raw.relationships : [];
+        return {
+            title: String(raw?.title || 'Schema Diagram'),
+            tables: tables.map((table, index) => ({
+                id: String(table?.name || `Table ${index + 1}`),
+                name: String(table?.name || `Table ${index + 1}`),
+                columns: Array.isArray(table?.columns)
+                    ? table.columns.map((column, columnIndex) => ({
+                        id: `${String(table?.name || `Table ${index + 1}`)}:${String(column?.name || `column_${columnIndex + 1}`)}`,
+                        name: String(column?.name || `column_${columnIndex + 1}`),
+                        type: String(column?.type || 'unknown'),
+                        nullable: Boolean(column?.nullable),
+                        isPrimaryKey: Boolean(column?.is_primary_key),
+                        foreignKey: column?.foreign_key || null,
+                    }))
+                    : [],
+            })),
+            relationships: relationships
+                .map((relation, index) => ({
+                    id: `${relation?.from_table || 'from'}:${relation?.from_column || index}:${relation?.to_table || 'to'}:${relation?.to_column || index}`,
+                    fromTable: String(relation?.from_table || ''),
+                    fromColumn: String(relation?.from_column || ''),
+                    toTable: String(relation?.to_table || ''),
+                    toColumn: String(relation?.to_column || ''),
+                    kind: String(relation?.kind || ''),
+                }))
+                .filter((relation) => relation.fromTable && relation.toTable),
+        };
+    } catch {
+        return null;
+    }
+}
+
+function SchemaVisualizer({ content }) {
+    const schema = parseSchemaVisualizerContent(content);
+
+    if (!schema || !schema.tables.length) {
+        return (
+            <div className="cp-schema-empty">
+                <div className="cp-schema-empty-title">Schema preview unavailable</div>
+                <pre className="cp-schema-fallback">{String(content || '').trim() || '{}'}</pre>
+            </div>
+        );
+    }
+
+    const tableWidth = 262;
+    const gapX = 84;
+    const gapY = 82;
+    const cardPadding = 14;
+    const headerHeight = 38;
+    const rowHeight = 26;
+    const cols = schema.tables.length <= 2 ? Math.max(schema.tables.length, 1) : (schema.tables.length <= 4 ? 2 : 3);
+    const rowHeights = [];
+    const tableLayouts = schema.tables.map((table, index) => {
+        const row = Math.floor(index / cols);
+        const col = index % cols;
+        const height = headerHeight + (Math.max(table.columns.length, 1) * rowHeight) + cardPadding * 2;
+        rowHeights[row] = Math.max(rowHeights[row] || 0, height);
+        return {
+            ...table,
+            width: tableWidth,
+            height,
+            row,
+            col,
+        };
+    });
+
+    const rowOffsets = [];
+    let currentY = 28;
+    for (let rowIndex = 0; rowIndex < rowHeights.length; rowIndex += 1) {
+        rowOffsets[rowIndex] = currentY;
+        currentY += (rowHeights[rowIndex] || 0) + gapY;
+    }
+
+    const positionedTables = tableLayouts.map((table) => ({
+        ...table,
+        x: 28 + (table.col * (tableWidth + gapX)),
+        y: rowOffsets[table.row] || 28,
+    }));
+
+    const tableMap = Object.fromEntries(positionedTables.map((table) => [table.name, table]));
+    const svgWidth = 56 + (Math.max(cols, 1) * tableWidth) + (Math.max(cols - 1, 0) * gapX);
+    const svgHeight = Math.max(currentY, 140);
+
+    const getColumnAnchorY = (table, columnName) => {
+        const idx = Math.max(
+            0,
+            table.columns.findIndex((column) => column.name === columnName),
+        );
+        return table.y + headerHeight + cardPadding + (idx * rowHeight) + (rowHeight / 2);
+    };
+
+    return (
+        <div className="cp-schema-wrap">
+            <div className="cp-schema-title">{schema.title}</div>
+            <div className="cp-schema-canvas" style={{ width: svgWidth, minHeight: svgHeight }}>
+                <svg className="cp-schema-lines" width={svgWidth} height={svgHeight} viewBox={`0 0 ${svgWidth} ${svgHeight}`}>
+                    {schema.relationships.map((relation) => {
+                        const fromTable = tableMap[relation.fromTable];
+                        const toTable = tableMap[relation.toTable];
+                        if (!fromTable || !toTable) return null;
+
+                        const startOnRight = fromTable.x <= toTable.x;
+                        const startX = startOnRight ? fromTable.x + fromTable.width : fromTable.x;
+                        const endX = startOnRight ? toTable.x : toTable.x + toTable.width;
+                        const startY = getColumnAnchorY(fromTable, relation.fromColumn);
+                        const endY = getColumnAnchorY(toTable, relation.toColumn);
+                        const delta = Math.max(40, Math.abs(endX - startX) * 0.38);
+                        const c1x = startOnRight ? startX + delta : startX - delta;
+                        const c2x = startOnRight ? endX - delta : endX + delta;
+                        const markerId = startOnRight ? 'schemaArrowRight' : 'schemaArrowLeft';
+
+                        return (
+                            <g key={relation.id}>
+                                <path
+                                    className="cp-schema-path"
+                                    d={`M ${startX} ${startY} C ${c1x} ${startY}, ${c2x} ${endY}, ${endX} ${endY}`}
+                                    markerEnd={`url(#${markerId})`}
+                                />
+                            </g>
+                        );
+                    })}
+                    <defs>
+                        <marker id="schemaArrowRight" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                            <path d="M 0 0 L 10 5 L 0 10 z" className="cp-schema-arrow" />
+                        </marker>
+                        <marker id="schemaArrowLeft" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                            <path d="M 10 0 L 0 5 L 10 10 z" className="cp-schema-arrow" />
+                        </marker>
+                    </defs>
+                </svg>
+
+                {positionedTables.map((table) => (
+                    <div
+                        key={table.id}
+                        className="cp-schema-card"
+                        style={{ width: table.width, minHeight: table.height, left: table.x, top: table.y }}
+                    >
+                        <div className="cp-schema-card-head">{table.name}</div>
+                        <div className="cp-schema-card-body">
+                            {table.columns.map((column) => (
+                                <div key={column.id} className="cp-schema-row">
+                                    <div className="cp-schema-col-main">
+                                        <span className="cp-schema-col-name">{column.name}</span>
+                                        <div className="cp-schema-flags">
+                                            {column.isPrimaryKey && <span className="cp-schema-flag pk">PK</span>}
+                                            {column.foreignKey && <span className="cp-schema-flag fk">FK</span>}
+                                            {column.nullable && <span className="cp-schema-flag nullable">NULL</span>}
+                                        </div>
+                                    </div>
+                                    <span className="cp-schema-col-type">{column.type}</span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
 export default function ChatPage({ theme, onThemeToggle }) {
     const { user, logout } = useAuth();
     const navigate = useNavigate();
@@ -1830,11 +2005,14 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                 if (!streamArtifactDocFiles.includes('Requirements Document.md')) {
                                     streamArtifactDocFiles.push('Requirements Document.md');
                                 }
+                                if (!streamArtifactDocFiles.includes('ER Diagram.schema.json') && event.schema_file?.path) {
+                                    streamArtifactDocFiles.push(event.schema_file.path);
+                                }
                                 streamPreviewFiles = {
                                     ...streamPreviewFiles,
-                                    ...buildPreviewMapFromEntries(event.preview_file),
+                                    ...buildPreviewMapFromEntries([event.preview_file, event.schema_file].filter(Boolean)),
                                 };
-                                upsertRuntimePreviewFiles(event.preview_file, threadId);
+                                upsertRuntimePreviewFiles([event.preview_file, event.schema_file].filter(Boolean), threadId);
                                 return;
                             }
 
@@ -2320,7 +2498,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                 Object.entries(streamGeneratedFileMap).map(([path, content]) => ({ path, content }))
             );
             let streamArtifactDocFiles = Array.isArray(targetMsg?.files)
-                ? targetMsg.files.filter((f) => typeof f === 'string' && (f.endsWith('.md') || f.endsWith('.mmd')))
+                ? targetMsg.files.filter((f) => typeof f === 'string' && isArtifactPreviewFile(f))
                 : [];
 
             setMessages(curr => curr.map(msg => msg.id === msgId ? {
@@ -2890,9 +3068,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                             ? prevMsg.text
                                             : '';
                                     const allArtifactFiles = Array.isArray(msg.files) ? msg.files : [];
-                                    const nonCodeArtifacts = allArtifactFiles.filter((f) =>
-                                        ['Requirements Document.md', 'Architecture Diagram.mmd', 'Architecture Design.md'].includes(f)
-                                    );
+                                    const nonCodeArtifacts = allArtifactFiles.filter((f) => isArtifactPreviewFile(f));
                                     const codeArtifactFiles = allArtifactFiles.filter((f) => !nonCodeArtifacts.includes(f));
 
                                     if (assistantIsPipelineAck) {
@@ -3129,33 +3305,37 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                                             )}
 
                                                             {msg.status === 'completed' && msg.phase >= 2 && codeArtifactFiles.length > 0 && (
-                                                                <div className="cp-export-block">
-                                                                    <div className="cp-deploy-content">
-                                                                        Download the generated backend files so you can drop the <code>backend/</code> folder into your project.
+                                                                <>
+                                                                    <div className="cp-export-block">
+                                                                        <div className="cp-deploy-content">
+                                                                            Download the generated backend files so you can drop the <code>backend/</code> folder into your project.
+                                                                        </div>
+                                                                        <button
+                                                                            className="cp-action-btn cp-action-download"
+                                                                            onClick={() => exportBackendBundle(
+                                                                                (msg.runMode === 'real' && Object.keys(msg.generatedFileMap || {}).length)
+                                                                                    ? msg.generatedFileMap
+                                                                                    : MOCK_FILES
+                                                                            )}
+                                                                        >
+                                                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                                                                <polyline points="7 10 12 15 17 10" />
+                                                                                <line x1="12" y1="15" x2="12" y2="3" />
+                                                                            </svg>
+                                                                            Download Backend Files
+                                                                        </button>
                                                                     </div>
-                                                                    <button
-                                                                        className="cp-action-btn cp-action-download"
-                                                                        onClick={() => exportBackendBundle(
-                                                                            (msg.runMode === 'real' && Object.keys(msg.generatedFileMap || {}).length)
-                                                                                ? msg.generatedFileMap
-                                                                                : MOCK_FILES
-                                                                        )}
-                                                                    >
-                                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                                                            <polyline points="7 10 12 15 17 10" />
-                                                                            <line x1="12" y1="15" x2="12" y2="3" />
-                                                                        </svg>
-                                                                        Download Backend Files
-                                                                    </button>
-                                                                    <button
-                                                                        className="cp-action-btn cp-action-tester"
-                                                                        onClick={openTesterPanel}
-                                                                    >
-                                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
-                                                                        Test API Endpoints
-                                                                    </button>
-                                                                </div>
+                                                                    <div className="cp-standalone-action">
+                                                                        <button
+                                                                            className="cp-action-btn cp-action-tester"
+                                                                            onClick={openTesterPanel}
+                                                                        >
+                                                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
+                                                                            Test API Endpoints
+                                                                        </button>
+                                                                    </div>
+                                                                </>
                                                             )}
 
                                                             {/* Always show deployment blocks for completed pipeline phases, regardless of explicit payload flags */}
@@ -3428,7 +3608,11 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                             {copyPreviewStatus === 'copied' ? 'Copied' : copyPreviewStatus === 'failed' ? 'Copy failed' : 'Copy'}
                                         </button>
                                     </div>
-                                    {previewFile?.toLowerCase?.().endsWith('.mmd') ? (
+                                    {isSchemaVisualizerPreview(previewFile) ? (
+                                        <div className="cp-ide-scroll">
+                                            <SchemaVisualizer content={getPreviewFileContent(previewFile)} />
+                                        </div>
+                                    ) : previewFile?.toLowerCase?.().endsWith('.mmd') ? (
                                         <div className="cp-ide-scroll">
                                             <MermaidPreview code={getPreviewFileContent(previewFile)} theme={theme} />
                                         </div>
