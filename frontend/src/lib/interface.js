@@ -92,6 +92,7 @@ export function clearAllInterfaceThreadContexts() {
 export async function routeChatIntent(prompt, options = {}) {
     const recentMessages = trimRecentMessages(options.recentMessages || []);
     const attachmentSummaries = (options.attachmentSummaries || []).slice(-8);
+    const threadId = typeof options.threadId === 'string' ? options.threadId.trim() : '';
     const response = await fetch(`${getBackendBaseUrl()}/api/v1/generate/interface`, {
         method: 'POST',
         headers: {
@@ -99,6 +100,7 @@ export async function routeChatIntent(prompt, options = {}) {
         },
         body: JSON.stringify({
             prompt,
+            thread_id: threadId || null,
             recent_messages: recentMessages,
             attachment_summaries: attachmentSummaries,
         }),

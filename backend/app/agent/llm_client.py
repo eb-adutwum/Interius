@@ -303,3 +303,70 @@ class LLMClient:
         if last_error:
             raise last_error
         raise RuntimeError("Text generation failed without a captured error")
+
+    async def generate_plain_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        temperature: float = 0.2,
+    ) -> str:
+        """
+        Generate a plain-language answer without code-fence bias or file-content retry instructions.
+        """
+        last_error: Exception | None = None
+        prompts = [
+            system_prompt,
+            (
+                f"{system_prompt}\n\n"
+                "RETRY INSTRUCTIONS: Return only the direct answer. "
+                "Do not use markdown code fences or unrelated preamble."
+            ),
+        ]
+        for attempt_idx, system_prompt_attempt in enumerate(prompts, start=1):
+            try:
+                logger.info(
+                    "Issuing plain-text request to model %s (attempt %s/%s)...",
+                    self.model_name,
+                    attempt_idx,
+                    len(prompts),
+                )
+                response = await self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt_attempt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    **self._chat_completion_kwargs(
+                        temperature=0 if attempt_idx > 1 else temperature
+                    ),
+                )
+                if not getattr(response, "choices", None):
+                    raise ValueError("Provider returned no output")
+                text_response = (response.choices[0].message.content or "").strip()
+                text_response = _strip_code_fences(text_response)
+                if not text_response:
+                    raise ValueError("Model returned empty content")
+                logger.info(
+                    "Successfully received plain-text response from %s (attempt %s).",
+                    self.model_name,
+                    attempt_idx,
+                )
+                return text_response
+            except Exception as e:
+                last_error = e
+                if attempt_idx < len(prompts):
+                    logger.warning(
+                        "Plain-text generation failed for %s on attempt %s/%s: %s. Retrying...",
+                        self.model_name,
+                        attempt_idx,
+                        len(prompts),
+                        e,
+                    )
+                    continue
+                logger.error("Error generating plain-text response from %s: %s", self.model_name, e)
+                raise
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("Plain-text generation failed without a captured error")

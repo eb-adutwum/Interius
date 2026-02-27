@@ -891,6 +891,22 @@ export default function ChatPage({ theme, onThemeToggle }) {
     const latestAwaitingApprovalAgent = [...messages]
         .reverse()
         .find((msg) => msg?.type === 'agent' && msg?.runMode === 'real' && msg?.status === 'awaiting_approval' && msg?.approvalCheckpoint?.stage === 'post_architecture');
+    const latestRetrievableAgent = [...messages]
+        .reverse()
+        .find((msg) => {
+            if (msg?.type !== 'agent') return false;
+            const hasFiles = Array.isArray(msg?.files) && msg.files.length > 0;
+            const hasGeneratedCode = Boolean(msg?.generatedFileMap && Object.keys(msg.generatedFileMap).length);
+            const hasArtifacts = Boolean(msg?.requirementsArtifact || msg?.architectureArtifact || msg?.approvalCheckpoint?.architectureArtifact);
+            return hasFiles || hasGeneratedCode || hasArtifacts;
+        });
+    const latestResumableArchitectureAgent = [...messages]
+        .reverse()
+        .find((msg) => {
+            if (msg?.type !== 'agent' || msg?.runMode !== 'real') return false;
+            if (msg?.status === 'awaiting_approval' && msg?.approvalCheckpoint?.stage === 'post_architecture') return true;
+            return Boolean(msg?.requirementsArtifact && msg?.architectureArtifact);
+        });
     const previewFilesMap = { ...MOCK_FILES, ...runtimePreviewFiles };
     const suggestEditsEnabled = true;
     const canSuggestEditsInPreview = suggestEditsEnabled && Boolean(latestAwaitingApprovalAgent);
@@ -898,11 +914,50 @@ export default function ChatPage({ theme, onThemeToggle }) {
         latestAgentMessage &&
         (latestAgentMessage.status === 'running' || latestAgentMessage.status === 'awaiting_approval')
     );
+    const openTesterPanel = useCallback(() => {
+        setPreviewFile(null);
+        setPanelMode('tester');
+    }, []);
+
+    const buildResumeCheckpointFromMessage = (msg, promptText) => {
+        if (!msg) return null;
+        if (msg?.approvalCheckpoint?.stage === 'post_architecture') {
+            return {
+                stage: 'post_architecture',
+                prompt: promptText || msg.approvalCheckpoint.prompt || '',
+                requirementsArtifact: msg.approvalCheckpoint.requirementsArtifact || null,
+                architectureArtifact: msg.approvalCheckpoint.architectureArtifact || null,
+            };
+        }
+        if (msg?.requirementsArtifact && msg?.architectureArtifact) {
+            return {
+                stage: 'post_architecture',
+                prompt: promptText || '',
+                requirementsArtifact: msg.requirementsArtifact,
+                architectureArtifact: msg.architectureArtifact,
+            };
+        }
+        return null;
+    };
+
+    const getArtifactRetrievalTarget = (decision, originalText) => {
+        const normalized = String(originalText || '').toLowerCase();
+        if (/(requirement|requirements|spec)/.test(normalized)) return 'requirements';
+        if (/(architecture|diagram|mmd)/.test(normalized)) return 'architecture';
+        if (/(code|files|file|download|redownload|re-download)/.test(normalized)) return 'code_bundle';
+        const target = decision?.execution_plan?.target;
+        if (typeof target === 'string') return target;
+        return 'all';
+    };
 
     useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, isTyping]);
     useEffect(() => {
         const cached = readThreadUiCache(activeThread);
         setRuntimePreviewFiles(cached?.previewFiles || {});
+    }, [activeThread]);
+    useEffect(() => {
+        setPanelMode(null);
+        setPreviewFile(null);
     }, [activeThread]);
 
     // Close model dropdown on outside click
@@ -1380,6 +1435,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                 .map((m) => ({ role: m.type, content: m.text }))
                 .filter((m) => ['user', 'assistant', 'agent'].includes(m.role) && m.content);
             interfaceDecision = await routeChatIntent(text, {
+                threadId,
                 recentMessages: cachedContext.length ? cachedContext : fallbackUiContext,
                 attachmentSummaries: getThreadFileContextSummaries(threadId),
             });
@@ -1401,6 +1457,90 @@ export default function ChatPage({ theme, onThemeToggle }) {
                 content: assistantReply
             });
 
+            if (interfaceDecision?.action_type === 'artifact_retrieval') {
+                const source = latestRetrievableAgent;
+                if (source) {
+                    const retrievalTarget = getArtifactRetrievalTarget(interfaceDecision, text);
+                    const retrievalText = retrievalTarget === 'requirements'
+                        ? 'Interius retrieved the latest requirements artifact from this thread.'
+                        : retrievalTarget === 'architecture'
+                            ? 'Interius retrieved the latest architecture artifacts from this thread.'
+                            : retrievalTarget === 'code_bundle'
+                                ? 'Interius retrieved the latest generated code files from this thread.'
+                                : 'Interius retrieved the latest generated artifacts from this thread.';
+                    const sourceFilesAll = Array.isArray(source.files) ? source.files.filter(Boolean) : [];
+                    const sourceGeneratedFileMap = source.generatedFileMap || {};
+                    const codeFiles = sourceFilesAll.filter((p) => !/\.(md|mmd)$/i.test(String(p)));
+                    const artifactDocFiles = sourceFilesAll.filter((p) => /\.(md|mmd)$/i.test(String(p)));
+                    const requirementsFiles = artifactDocFiles.filter((p) => /requirements document\.md$/i.test(String(p)));
+                    const architectureFiles = artifactDocFiles.filter((p) => /architecture (design\.md|diagram\.mmd)$/i.test(String(p)));
+                    const selectedFiles =
+                        retrievalTarget === 'requirements' ? requirementsFiles :
+                        retrievalTarget === 'architecture' ? architectureFiles :
+                        retrievalTarget === 'code_bundle' ? codeFiles :
+                        sourceFilesAll;
+                    const selectedGeneratedFileMap =
+                        retrievalTarget === 'requirements' || retrievalTarget === 'architecture'
+                            ? {}
+                            : sourceGeneratedFileMap;
+                    const sourceRequirementsArtifact =
+                        source.requirementsArtifact || source.approvalCheckpoint?.requirementsArtifact || null;
+                    const sourceArchitectureArtifact =
+                        source.architectureArtifact || source.approvalCheckpoint?.architectureArtifact || null;
+                    const retrievalAgentMsg = {
+                        type: 'agent',
+                        text: retrievalText,
+                        isStreaming: false,
+                        status: 'completed',
+                        phase: 2,
+                        stepIndex: 99,
+                        runMode: 'real',
+                        hideThoughtProcess: true,
+                        retrievalTarget,
+                        files: selectedFiles,
+                        generatedFileMap: selectedGeneratedFileMap,
+                        reviewUpdates: [],
+                        requirementsArtifact: sourceRequirementsArtifact,
+                        architectureArtifact: sourceArchitectureArtifact,
+                    };
+                    setMessages((m) => [...m, retrievalAgentMsg]);
+
+                    const { data: savedRetrievalAgent, error: saveRetrievalAgentError } = await supabase
+                        .from('messages')
+                        .insert({
+                            thread_id: threadId,
+                            user_id: user.id,
+                            role: 'agent',
+                            content: retrievalText,
+                        })
+                        .select('id')
+                        .single();
+                    if (saveRetrievalAgentError) {
+                        console.warn('Failed to persist artifact retrieval agent message', saveRetrievalAgentError);
+                    } else if (savedRetrievalAgent?.id) {
+                        await persistMessageArtifactBundle({
+                            threadId,
+                            messageId: savedRetrievalAgent.id,
+                            userId: user.id,
+                            agentState: retrievalAgentMsg,
+                            previewFiles: runtimePreviewFiles,
+                        });
+                    }
+
+                    appendInterfaceThreadContext(threadId, { role: 'agent', content: retrievalText });
+                } else {
+                    const noArtifactsText = 'Interius could not find generated artifacts in this thread yet. Start a build first, then ask me to retrieve them.';
+                    setMessages((m) => [...m, { type: 'assistant', text: noArtifactsText }]);
+                    appendInterfaceThreadContext(threadId, { role: 'assistant', content: noArtifactsText });
+                    await supabase.from('messages').insert({
+                        thread_id: threadId,
+                        user_id: user.id,
+                        role: 'assistant',
+                        content: noArtifactsText,
+                    });
+                }
+            }
+
             isGeneratingRef.current = false;
             setPanelMode(null);
             inputRef.current?.focus();
@@ -1408,9 +1548,18 @@ export default function ChatPage({ theme, onThemeToggle }) {
         }
 
         if (interfaceDecision?.should_trigger_pipeline === true) {
+            const executionPlanMode = interfaceDecision?.execution_plan?.mode || null;
+            const wantsResumeFromArchitecture =
+                executionPlanMode === 'resume_from_architecture' ||
+                interfaceDecision?.action_type === 'continue_from_architecture';
+            const preliminaryResumeCheckpoint = wantsResumeFromArchitecture
+                ? buildResumeCheckpointFromMessage(latestResumableArchitectureAgent, text || userMessageContent || '')
+                : null;
+            const canResumeFromArchitecture = Boolean(preliminaryResumeCheckpoint);
+
             // If this thread already contains a previous build, fork into a new thread so
             // artifacts/code from the earlier run remain intact in the original thread.
-            if (hadExistingBuild && !createdThreadThisSend && sourceThreadId && threadId === sourceThreadId) {
+            if (hadExistingBuild && !canResumeFromArchitecture && !createdThreadThisSend && sourceThreadId && threadId === sourceThreadId) {
                 try {
                     const forkTitleSeed = buildThreadTitleSeed(sourceThreadId, text || userMessageContent || '');
                     const forkTitle = await generateThreadTitle(forkTitleSeed || text || 'New build');
@@ -1491,6 +1640,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
 
             const assistantReply = (interfaceDecision.assistant_reply || '').trim();
             const buildContextFiles = getThreadBuildContextFiles(threadId);
+            const resumeCheckpoint = canResumeFromArchitecture ? preliminaryResumeCheckpoint : null;
             const shouldAutoRename = shouldAutoRenameBuildThread(threadId, hadExistingBuild);
 
             if (shouldAutoRename) {
@@ -1560,11 +1710,14 @@ export default function ChatPage({ theme, onThemeToggle }) {
 
                     await streamThreadChatGeneration({
                         threadId,
-                        prompt: text,
+                        prompt: interfaceDecision?.pipeline_prompt || text,
                         recentMessages: cachedContext.length ? cachedContext : fallbackUiContext,
                         attachmentSummaries: getThreadFileContextSummaries(threadId),
                         threadContextFiles: buildContextFiles,
-                        stopAfterArchitecture: TEMP_STOP_AFTER_ARCHITECTURE || !autoApprove,
+                        stopAfterArchitecture: resumeCheckpoint ? false : (TEMP_STOP_AFTER_ARCHITECTURE || !autoApprove),
+                        resumeFromStage: resumeCheckpoint ? 'post_architecture' : null,
+                        approvedRequirementsArtifact: resumeCheckpoint?.requirementsArtifact || null,
+                        approvedArchitectureArtifact: resumeCheckpoint?.architectureArtifact || null,
                         signal: streamAbortController.signal,
                         onEvent: (event) => {
                             streamStarted = true;
@@ -1759,6 +1912,8 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                     runMode: 'real',
                                     stageTimings: streamStageTimings,
                                     reviewUpdates: streamReviewUpdates,
+                                    requirementsArtifact: streamRequirementsArtifact,
+                                    architectureArtifact: streamArchitectureArtifact,
                                 });
                                 writeThreadUiCache(threadId, {
                                     latestRealAgent: {
@@ -1772,6 +1927,8 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                         runMode: 'real',
                                         stageTimings: streamStageTimings,
                                         reviewUpdates: streamReviewUpdates,
+                                        requirementsArtifact: streamRequirementsArtifact,
+                                        architectureArtifact: streamArchitectureArtifact,
                                     }
                                 });
                                 return;
@@ -1865,9 +2022,11 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                     runMode: 'real',
                                     stageTimings: streamStageTimings,
                                     reviewUpdates: streamReviewUpdates,
+                                    requirementsArtifact: streamRequirementsArtifact,
+                                    architectureArtifact: streamArchitectureArtifact,
                                 },
-                            previewFiles: streamPreviewFiles,
-                        });
+                                previewFiles: streamPreviewFiles,
+                            });
                     }
                     appendInterfaceThreadContext(threadId, { role: 'agent', content: streamFinalSummary || AGENT_FINAL.text });
 
@@ -2723,7 +2882,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                                         </div>
                                                     )}
                                                     {/* Thought Process Tree */}
-                                                    <div className="cp-thought-process">
+                                                    {!msg.hideThoughtProcess && <div className="cp-thought-process">
                                                         <details
                                                             className="cp-thought-details"
                                                             open={msg.isStreaming || msg.status === 'awaiting_approval'}
@@ -2847,7 +3006,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                                                 </div>
                                                             )}
                                                         </details>
-                                                    </div>
+                                                    </div>}
 
                                                     {/* Human in the loop halt block */}
                                                     {msg.status === 'awaiting_approval' && (
@@ -2913,7 +3072,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                                                 </div>
                                                             )}
 
-                                                            {msg.status === 'completed' && msg.phase >= 2 && (
+                                                            {msg.status === 'completed' && msg.phase >= 2 && codeArtifactFiles.length > 0 && (
                                                                 <div className="cp-export-block">
                                                                     <div className="cp-deploy-content">
                                                                         Download the generated backend files so you can drop the <code>backend/</code> folder into your project.
@@ -2933,6 +3092,13 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                                                         </svg>
                                                                         Download Backend Files
                                                                     </button>
+                                                                    <button
+                                                                        className="cp-action-btn cp-action-tester"
+                                                                        onClick={openTesterPanel}
+                                                                    >
+                                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
+                                                                        Test API Endpoints
+                                                                    </button>
                                                                 </div>
                                                             )}
 
@@ -2943,7 +3109,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                                                         <div className="cp-deploy-content">
                                                                             Use the interactive API playground to test your generated endpoints.
                                                                         </div>
-                                                                        <button className="cp-action-btn cp-action-tester" onClick={() => { setPreviewFile(null); setPanelMode('tester'); }}>
+                                                                        <button className="cp-action-btn cp-action-tester" onClick={openTesterPanel}>
                                                                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
                                                                             Test API Endpoints
                                                                         </button>
@@ -3182,7 +3348,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
                                         </a>
                                     </div>
-                                    <p className="cp-rp-desc">Try your endpoints live — no setup or code needed.</p>
+                                    <p className="cp-rp-desc">Try your endpoints live or use the built-in tester cards while runtime wiring is being refined.</p>
                                     <div className="cp-rp-endpoints">
                                         {ENDPOINTS.map(ep => <EndpointCard key={ep.id} ep={ep} />)}
                                     </div>

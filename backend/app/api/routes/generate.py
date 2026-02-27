@@ -17,6 +17,8 @@ from app.agent.interface import (
 )
 from app.agent.artifacts import ProjectCharter, SystemArchitecture
 from app.agent.orchestrator import run_pipeline_generator
+from app.agent.rag import format_thread_generated_file_context, get_rag_manager
+from app.agent.llm_client import LLMClient
 from app.api.deps import CurrentUser, get_db
 from app.core.config import settings
 from app.crud import create_generation_run, create_project, create_user, get_user_by_email
@@ -29,6 +31,7 @@ GENERATION_RUN_PROMPT_MAX_CHARS = 5000
 
 class InterfacePromptRequest(BaseModel):
     prompt: str
+    thread_id: str | None = None
     recent_messages: list[InterfaceContextMessage] = Field(default_factory=list)
     attachment_summaries: list[InterfaceAttachmentSummary] = Field(default_factory=list)
 
@@ -145,6 +148,68 @@ def _derive_project_name_from_prompt(prompt: str, thread_id: str) -> str:
     return (cleaned[:80]).strip() or f"Chat Thread {thread_id[:8]}"
 
 
+THREAD_CODE_QA_SYSTEM_PROMPT = """
+You are Interius, answering questions about code generated in the current chat thread.
+
+Rules:
+- Use only the retrieved code snippets provided to you.
+- Be explicit about uncertainty when the snippets are insufficient.
+- Mention relevant files inline using backticks, including line numbers when provided.
+- Focus on explanation, traceability, and practical understanding of the generated code.
+- Do not invent files, functions, or behavior that are not present in the snippets.
+""".strip()
+
+
+def _fallback_thread_code_answer(snippets: list[dict[str, Any]]) -> str:
+    refs: list[str] = []
+    for snippet in snippets[:3]:
+        filename = snippet.get("filename") or "unknown"
+        start_line = snippet.get("start_line")
+        if start_line:
+            refs.append(f"`{filename}:{start_line}`")
+        else:
+            refs.append(f"`{filename}`")
+    joined = ", ".join(refs)
+    if not joined:
+        return (
+            "Interius couldn't explain the generated code right now, but I also couldn't find "
+            "relevant snippets in this thread."
+        )
+    return (
+        "Interius found relevant generated code in this thread, but I couldn't produce a grounded "
+        f"explanation just now. Start with {joined}."
+    )
+
+
+async def _answer_thread_code_question(thread_id: str, prompt: str) -> str:
+    snippets = get_rag_manager().query_thread_generated_files(thread_id, prompt, n_results=5)
+    if not snippets:
+        return (
+            "Interius couldn't find generated code indexed for this thread yet. "
+            "Generate code in this thread first, then ask about a file, route, or flow."
+        )
+
+    context = format_thread_generated_file_context(snippets)
+    llm = LLMClient(
+        model_name=settings.MODEL_INTERFACE,
+        base_url=settings.INTERFACE_LLM_BASE_URL or None,
+        api_key=settings.INTERFACE_LLM_API_KEY or None,
+    )
+    try:
+        return await llm.generate_plain_text(
+            system_prompt=THREAD_CODE_QA_SYSTEM_PROMPT,
+            user_prompt=(
+                f"User question:\n{prompt}\n\n"
+                f"Retrieved snippets:\n{context}\n\n"
+                "Answer the user's question using only the snippets above."
+            ),
+            temperature=0.2,
+        )
+    except Exception as exc:
+        logger.warning("Thread code QA fallback triggered for thread %s: %s", thread_id, exc)
+        return _fallback_thread_code_answer(snippets)
+
+
 def _resolve_or_create_project_for_thread(
     session: Session,
     current_user: Any,
@@ -199,6 +264,8 @@ async def run_interface_then_pipeline_ui_stream(
     session: Session,
     project_id: uuid.UUID,
     payload: ChatGenerateStreamRequest,
+    *,
+    thread_id: str | None = None,
 ):
     """
     UI-first streaming wrapper.
@@ -403,6 +470,9 @@ async def run_interface_then_pipeline_ui_stream(
         if status == "reviewer_done":
             review_artifact = event.get("artifact") or {}
             captured["review"] = review_artifact
+            final_code = review_artifact.get("final_code") or []
+            if final_code:
+                captured["code_files"] = final_code
             yield _ui_event("stage_completed", stage="reviewer", phase=2, step="review")
             yield _ui_event(
                 "review_update",
@@ -428,6 +498,15 @@ async def run_interface_then_pipeline_ui_stream(
             continue
 
         if status == "completed":
+            final_artifact = event.get("artifact") or {}
+            final_code = final_artifact.get("final_code") or []
+            if final_code:
+                captured["code_files"] = final_code
+            if thread_id and captured.get("code_files"):
+                try:
+                    get_rag_manager().replace_thread_generated_files(thread_id, captured["code_files"] or [])
+                except Exception as exc:
+                    logger.warning("Failed to index generated files for thread %s: %s", thread_id, exc)
             req = captured.get("requirements") or {}
             project_name = req.get("project_name") or "backend"
             endpoints = req.get("endpoints") or []
@@ -442,7 +521,7 @@ async def run_interface_then_pipeline_ui_stream(
                 trigger_pipeline=True,
                 message=event.get("message"),
                 summary=summary,
-                final_artifact=event.get("artifact"),
+                final_artifact=final_artifact,
                 requirements_artifact=captured.get("requirements"),
                 architecture_artifact=captured.get("architecture"),
                 files=captured.get("code_files") or [],
@@ -465,11 +544,28 @@ async def route_interface_prompt(payload: InterfacePromptRequest) -> InterfaceDe
     Returns a normal conversational reply or a pipeline-routing decision.
     """
     try:
-        return await InterfaceAgent().run(
+        agent = InterfaceAgent()
+        decision = await agent.run(
             payload.prompt,
             recent_messages=payload.recent_messages,
             attachment_summaries=payload.attachment_summaries,
         )
+        if (
+            payload.thread_id
+            and not decision.should_trigger_pipeline
+            and agent.looks_like_thread_code_question(payload.prompt, payload.recent_messages)
+        ):
+            grounded_reply = await _answer_thread_code_question(payload.thread_id, payload.prompt)
+            return decision.model_copy(
+                update={
+                    "intent": "context_question",
+                    "action_type": "chat",
+                    "assistant_reply": grounded_reply,
+                    "pipeline_prompt": None,
+                    "execution_plan": None,
+                }
+            )
+        return decision
     except Exception as exc:
         logger.warning("Interface-only route failed; returning pipeline fallback: %s", exc)
         return InterfaceDecision(
@@ -602,5 +698,5 @@ async def generate_pipeline_for_chat_thread(
             detail="Database connection unavailable. Please retry in a moment.",
         ) from exc
     return EventSourceResponse(
-        run_interface_then_pipeline_ui_stream(session, project_id, payload)
+        run_interface_then_pipeline_ui_stream(session, project_id, payload, thread_id=thread_id)
     )

@@ -7,7 +7,6 @@ from sqlmodel import Session
 from app.agent.architecture_agent import ArchitectureAgent
 from app.agent.artifacts import GeneratedCode, ProjectCharter, SystemArchitecture
 from app.agent.implementer_agent import ImplementerAgent
-from app.agent.rag import get_rag_manager
 from app.agent.requirements_agent import RequirementsAgent
 from app.agent.reviewer_agent import ReviewerAgent
 from app.crud import create_artifact_record, update_generation_run_status
@@ -130,6 +129,7 @@ async def run_pipeline_generator(
 
                 review = await rev_agent.run(code)
                 review_artifact_for_completion = review.model_dump()
+                review_artifact_for_completion["final_code"] = [f.model_dump() for f in code.files]
 
                 # Save the review artifact for this pass
                 create_artifact_record(
@@ -172,16 +172,19 @@ async def run_pipeline_generator(
                 if review.final_code:
                     logger.info("Review pass %s returned reviewer rewrites; re-running review.", attempt)
                     code = GeneratedCode(files=review.final_code, dependencies=code.dependencies)
-                    yield json.dumps({
-                        "status": "revision",
-                    "message": (
-                        f"Pass {attempt}: reviewer provided code fixes; "
-                        "re-reviewing updated files..."
-                    ),
-                    "attempt": attempt,
-                    "issues_count": len(review.issues)
-                })
-                continue
+                    review_artifact_for_completion["final_code"] = [f.model_dump() for f in code.files]
+                    yield json.dumps(
+                        {
+                            "status": "revision",
+                            "message": (
+                                f"Pass {attempt}: reviewer provided code fixes; "
+                                "re-reviewing updated files..."
+                            ),
+                            "attempt": attempt,
+                            "issues_count": len(review.issues),
+                        }
+                    )
+                    continue
 
                 issue_map: dict[str, list[str]] = {}
                 for issue in review.issues or []:
@@ -233,6 +236,7 @@ async def run_pipeline_generator(
                     patch_requests=patch_requests,
                     review_issue_descriptions_by_file=issue_map,
                 )
+                review_artifact_for_completion["final_code"] = [f.model_dump() for f in code.files]
 
                 yield json.dumps({
                     "status": "revision",

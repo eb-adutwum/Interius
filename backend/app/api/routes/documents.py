@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 from app.api.deps import CurrentUser, get_db
 from app.models import Document, DocumentCreate, DocumentPublic
 from app.agent.rag import get_rag_manager
+from app.text_chunking import chunk_text
 
 router = APIRouter()
 
@@ -31,31 +32,6 @@ def extract_text_from_file(file: UploadFile, content: bytes) -> str:
         
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}")
-
-
-def chunk_text(text: str, chunk_size: int = 2000, overlap: int = 200) -> list[str]:
-    """Splits text into chunks by character count with overlap."""
-    chunks = []
-    start = 0
-    text_len = len(text)
-    
-    while start < text_len:
-        end = min(start + chunk_size, text_len)
-        
-        # If we are not at the end of the text, try to find a natural break point (newline or space)
-        if end < text_len:
-            # Looking back up to 100 characters to find a good break point
-            break_point = end
-            for i in range(end, max(start, end - 100), -1):
-                if text[i] in ['\n', '.', ' ']:
-                    break_point = i + 1
-                    break
-            end = break_point
-            
-        chunks.append(text[start:end])
-        start = end - overlap
-        
-    return chunks
 
 @router.post("/", response_model=DocumentPublic)
 async def upload_document(
