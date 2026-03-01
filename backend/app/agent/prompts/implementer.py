@@ -33,6 +33,7 @@ Rules:
 - Must be runnable with `uvicorn app.main:app --reload`.
 - Must use FastAPI + SQLModel.
 - Use SQLite by default with DATABASE_URL env override unless the architecture explicitly requires something else.
+- Bias toward SIMPLE APIs and simple internal structure. Prefer fewer moving parts over layered abstractions unless the architecture clearly requires extra layers.
 
 Required files (always include):
 - app/main.py
@@ -48,6 +49,8 @@ Authentication:
 API scope:
 - Implement the core backend/API functionality described in the requirements and architecture.
 - Prefer CRUD endpoints for the primary resource(s) if the requirements imply CRUD.
+- Prefer one primary resource group plus only the most necessary supporting routes.
+- Avoid clever endpoint shapes, nested route trees, or duplicate resource prefixes.
 - Use schemas for request/response validation.
 - Keep routing and database access complete end-to-end (no missing layers).
 
@@ -114,6 +117,23 @@ Implementation constraints:
 - Keep everything minimal but runnable.
 - Prefer clarity and correctness over cleverness.
 - Use absolute imports (e.g., `from app.database import get_session`) for local modules.
+- If you introduce helper layers such as `service`, `services`, `repository`, `crud`, or `auth`, every caller must use the exact exported function names and keyword arguments those files actually define.
+- Do NOT invent alternate names for the same operation across layers (forbidden drift examples: `replace_todo` vs `update_todo`, `get_todo_by_id` vs `get_todo`, `due_before` vs `due_date_before` unless you explicitly provide a compatibility wrapper).
+- Use exactly one router-prefix strategy per resource: EITHER `APIRouter(prefix="/resource")` OR `app.include_router(router, prefix="/resource")`, never both.
+- Keep request/response schema names literal and consistent across files. If routes reference `TokenResponse`, `AttendanceCheckIn`, `TodoListResponse`, etc., those exact symbols must exist in `schemas.py`.
+- Infer dependencies from actual code usage. Examples: `EmailStr` requires `email-validator` (or `pydantic[email]`), JWT usage requires the JWT library, password hashing requires its dependency.
+- Prefer SQLModel/SQLAlchemy result access patterns that are broadly compatible in this runtime. Avoid fragile patterns like `session.exec(...).scalar_one()`.
+- Prefer plain CRUD and straightforward pagination/filtering. If a feature adds risk or ambiguity, choose the simpler API shape.
+
+Common pitfalls to avoid:
+- Double-prefixing routes, producing paths like `/todos/todos`
+- Route files referencing schema names that do not exist
+- Service/repository helper name drift
+- `Field(..., sa_column=...)` mixed with `primary_key`, `index`, or `unique` on the same `Field`
+- Forgetting to define a primary key: ANY class inheriting from `SQLModel` with `table=True` MUST have at least one field with `primary_key=True`
+- Subscripting scalar results: `session.exec(select(func.count(...))).one()` returns an integer directly. DO NOT add `[0]` to it, otherwise it crashes with TypeError.
+- Missing runtime dependencies implied by field types or imports
+- Returning manual `Response(...)` objects when a normal response model return would be simpler and safer
 
 Error handling and data consistency:
 - Return 404 for missing resources in relevant endpoints.
@@ -124,8 +144,11 @@ Error handling and data consistency:
 Before outputting, self-check:
 1) Are all local imports within the planned file list?
 2) Do symbol names match what other planned files will import?
-3) Would this file compile given the other planned files?
-4) If auth is planned, are the intended protected endpoints actually protected?
+3) If this file calls another local module, do the callee function names and keyword arguments exactly match that module's API?
+4) If this file defines routes, are the path prefixes declared in exactly one place?
+5) If this file defines or references schemas, do the exact schema symbol names line up across files?
+6) Would this file compile given the other planned files?
+7) If auth is planned, are the intended protected endpoints actually protected?
 
 Return only the file contents.
 """
@@ -148,11 +171,16 @@ Rules:
 - Keep the file compatible with the existing planned file set.
 - No placeholders, no TODOs, no 'pass'.
 - Keep the file runnable and consistent with the other files.
+- When patching route/service/repository files, make exported function names and keyword signatures match across every caller/callee edge.
+- When patching routes or main app wiring, ensure resource prefixes are declared in exactly one place.
+- If reviewer feedback mentions startup/runtime issues, favor the simplest compatible fix over adding more abstraction.
 
 Before outputting, self-check:
 1) Did you fix the reviewer issues for this file?
 2) Did you avoid introducing new imports to unplanned local modules?
-3) Does the file remain syntactically valid?
+3) If this file is called by another planned file, will its exported symbols and keyword arguments still match those callers?
+4) If this file is `main.py` or `routes.py`, did you avoid duplicate route prefixes?
+5) Does the file remain syntactically valid?
 
 Return only the complete file contents.
 """

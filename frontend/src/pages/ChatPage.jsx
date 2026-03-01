@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -69,21 +69,13 @@ const AGENT_PHASE_1 = [
         id: 'req',
         text: 'Analyzing requirements…',
         doneText: 'Requirement analysis done.',
-        sub: [
-            { label: 'Extract entities and endpoints' },
-            { label: 'Validate business rules' },
-            { label: 'Produce requirements spec' },
-        ]
+        sub: [{ label: 'Extracting functional requirements' }, { label: 'Defining data entities' }, { label: 'Mapping API endpoints' }]
     },
     {
         id: 'arch',
         text: 'Planning architecture…',
         doneText: 'Architecture designed.',
-        sub: [
-            { label: 'Define service layers' },
-            { label: 'Map auth (if needed) and data flow' },
-            { label: 'Generate architecture blueprint' },
-        ]
+        sub: [{ label: 'Designing project structure' }, { label: 'Selecting dependencies' }, { label: 'Drafting component interactions' }]
     }
 ];
 
@@ -92,21 +84,13 @@ const AGENT_PHASE_2 = [
         id: 'code',
         text: 'Generating code…',
         doneText: 'Code generation complete.',
-        sub: [
-            { label: 'Scaffold project structure' },
-            { label: 'Implement models and routes' },
-            { label: 'Assemble runnable backend' }
-        ]
+        sub: [{ label: 'Scaffolding project files' }, { label: 'Writing business logic' }, { label: 'Injecting schemas and routes' }]
     },
     {
         id: 'review',
-        text: 'Reviewing generated code…',
-        doneText: 'Review completed.',
-        sub: [
-            { label: 'Check correctness and security' },
-            { label: 'Apply fixes if needed' },
-            { label: 'Finalize code package' },
-        ]
+        text: 'Reviewing and testing live API…',
+        doneText: 'Live endpoints verified.',
+        sub: [{ label: 'Running syntax validation' }, { label: 'Deploying sandbox container' }, { label: 'Executing API smoke tests' }, { label: 'Iterating repair loop' }]
     }
 ];
 
@@ -167,6 +151,95 @@ const THREAD_UI_CACHE_PREFIX = 'interius_thread_ui_cache:';
 const THREAD_UI_CACHE_TTL_MS = 30 * 60 * 1000;
 const TEMP_STOP_AFTER_ARCHITECTURE = false; // Set true only when isolating requirements+architecture for diagram debugging.
 const CHAT_MARKDOWN_ALLOWED_ELEMENTS = ['p', 'br', 'strong', 'em', 'del', 'code', 'pre', 'ul', 'ol', 'li', 'a', 'math', 'inlineMath'];
+const PANEL_DEFAULT_WIDTHS = { file: 660, tester: 440, sandbox: 780 };
+const PANEL_MIN_WIDTH = 360;
+const PANEL_MAX_WIDTH = 980;
+const SANDBOX_RECOVERY_TIMEOUT_MS = 25000;
+const SANDBOX_POLL_INTERVAL_MS = 3000;
+
+function getBackendBaseUrl() {
+    const explicit =
+        import.meta.env.VITE_BACKEND_URL ||
+        import.meta.env.VITE_BACKEND_API_URL;
+
+    return (explicit || 'http://localhost:8000').replace(/\/$/, '');
+}
+
+function parseOptionalNumber(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function buildReviewUpdateNote(event) {
+    const kind = event.kind || 'info';
+    const artifact = event.artifact || {};
+    const affectedFiles = Array.isArray(event.affected_files)
+        ? event.affected_files.filter(Boolean)
+        : [];
+    const attempt = parseOptionalNumber(event.attempt);
+    const issuesCount = parseOptionalNumber(event.issues_count);
+    const reviewScore = parseOptionalNumber(event.security_score);
+    const message = (event.message || '').trim();
+    const approved = typeof event.approved === 'boolean' ? event.approved : null;
+    const meetsTrustThreshold = typeof event.meets_trust_threshold === 'boolean' ? event.meets_trust_threshold : null;
+    const affectedSuffix = affectedFiles.length
+        ? ` Affected: ${affectedFiles.join(', ')}.`
+        : '';
+
+    if (kind === 'pass') {
+        return null;
+    }
+
+    if (kind === 'revision') {
+        return null;
+    }
+
+    if (kind === 'completed') {
+        const summaryBits = [];
+        if (reviewScore !== null) summaryBits.push(`review score ${reviewScore}/10`);
+        if (issuesCount !== null) summaryBits.push(`${issuesCount} issue(s)`);
+        const summary = summaryBits.length ? ` (${summaryBits.join(', ')})` : '';
+        const extraMessage = message && message !== 'Review completed.' ? ` ${message}` : '';
+        return {
+            kind,
+            text: `Review completed on pass ${attempt ?? '?'}${summary}.${extraMessage}${affectedSuffix}`
+                .replace(/\s+/g, ' ')
+                .trim(),
+        };
+    }
+
+    if (kind === 'failed') {
+        return {
+            kind,
+            text: `Reviewer failed on pass ${attempt ?? '?'}. ${message || 'Returning the latest generated code without review approval.'}${affectedSuffix}`
+                .replace(/\s+/g, ' ')
+                .trim(),
+        };
+    }
+
+    if (kind === 'repair_revision') {
+        return null;
+    }
+
+    if (kind === 'repair_completed') {
+        const summary = issuesCount !== null ? ` (${issuesCount} remaining runtime issue(s))` : '';
+        return {
+            kind,
+            text: `Repair loop completed after ${attempt ?? 0} pass(es)${summary}. ${message || 'Runtime repair checks finished.'}${affectedSuffix}`
+                .replace(/\s+/g, ' ')
+                .trim(),
+        };
+    }
+
+    if (kind === 'tests') {
+        return null;
+    }
+
+    const fallbackText = `${message}${affectedSuffix}`.replace(/\s+/g, ' ').trim();
+    if (!fallbackText) return null;
+    return { kind, text: fallbackText };
+}
 
 function threadUiCacheKey(threadId) {
     return `${THREAD_UI_CACHE_PREFIX}${threadId}`;
@@ -336,69 +409,484 @@ async function persistMessageArtifactBundle({ threadId, messageId, userId, agent
     }
 }
 
-/* ─── Endpoint Test Panel Data ─── */
-const ENDPOINTS = [
-    {
-        id: 'get-tasks',
-        method: 'GET',
-        path: '/tasks',
-        description: 'Returns a list of all your tasks.',
-        inputLabel: null,
-        placeholder: null,
-        mockResponse: JSON.stringify({ success: true, data: [{ id: 1, title: 'Buy groceries', done: false }, { id: 2, title: 'Walk the dog', done: true }] }, null, 2),
-    },
-    {
-        id: 'post-task',
-        method: 'POST',
-        path: '/tasks',
-        description: 'Creates a brand-new task.',
-        inputLabel: 'Task title',
-        placeholder: 'Buy groceries',
-        mockResponse: JSON.stringify({ success: true, data: { id: 3, title: 'Buy groceries', done: false, created_at: '2026-02-20T16:00:00Z' } }, null, 2),
-    },
-    {
-        id: 'get-task-id',
-        method: 'GET',
-        path: '/tasks/:id',
-        description: 'Fetch one task by its ID.',
-        inputLabel: 'Task ID',
-        placeholder: '1',
-        mockResponse: JSON.stringify({ success: true, data: { id: 1, title: 'Buy groceries', done: false } }, null, 2),
-    },
-    {
-        id: 'put-complete',
-        method: 'PUT',
-        path: '/tasks/:id/complete',
-        description: 'Marks a task as completed.',
-        inputLabel: 'Task ID to complete',
-        placeholder: '1',
-        mockResponse: JSON.stringify({ success: true, data: { id: 1, title: 'Buy groceries', done: true } }, null, 2),
-    },
-    {
-        id: 'delete-task',
-        method: 'DELETE',
-        path: '/tasks/:id',
-        description: 'Permanently removes a task.',
-        inputLabel: 'Task ID to delete',
-        placeholder: '2',
-        mockResponse: JSON.stringify({ success: true, message: 'Task 2 deleted.' }, null, 2),
-    },
-];
+const METHOD_COLOR = { GET: '#22c55e', POST: '#60a5fa', PUT: '#f59e0b', PATCH: '#f59e0b', DELETE: '#f87171' };
+const SANDBOX_TESTABLE_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+const THREAD_STORAGE_KEY = 'interius_active_thread';
 
-const METHOD_COLOR = { GET: '#22c55e', POST: '#60a5fa', PUT: '#f59e0b', DELETE: '#f87171' };
+function resolveSchemaRef(openApi, ref) {
+    if (!ref || typeof ref !== 'string' || !ref.startsWith('#/')) return null;
+    return ref
+        .slice(2)
+        .split('/')
+        .reduce((acc, key) => (acc && typeof acc === 'object' ? acc[key] : null), openApi);
+}
+
+function dereferenceSchema(schema, openApi) {
+    if (!schema || typeof schema !== 'object') return schema;
+    if (schema.$ref) {
+        const resolved = resolveSchemaRef(openApi, schema.$ref);
+        return resolved ? dereferenceSchema(resolved, openApi) : null;
+    }
+    if (Array.isArray(schema.anyOf)) {
+        const preferred = schema.anyOf.find((candidate) => candidate?.type && candidate.type !== 'null') || schema.anyOf[0];
+        return dereferenceSchema(preferred, openApi);
+    }
+    if (Array.isArray(schema.oneOf)) {
+        const preferred = schema.oneOf.find((candidate) => candidate?.type && candidate.type !== 'null') || schema.oneOf[0];
+        return dereferenceSchema(preferred, openApi);
+    }
+    return schema;
+}
+
+function buildNamedSampleValue(name, schema) {
+    const normalizedName = String(name || '').trim().toLowerCase();
+    const format = schema?.format;
+    const type = schema?.type;
+
+    if (format === 'date-time') return '2026-02-28T12:00:00Z';
+    if (format === 'date') return '2026-02-28';
+    if (format === 'email' || normalizedName.includes('email')) return 'user@example.com';
+    if (format === 'uuid') return '123e4567-e89b-12d3-a456-426614174000';
+    if (format === 'uri' || format === 'url' || normalizedName.includes('url')) return 'https://example.com';
+
+    if (type === 'boolean') {
+        if (normalizedName.includes('done') || normalizedName.includes('completed')) return false;
+        if (normalizedName.includes('active') || normalizedName.includes('enabled')) return true;
+        return true;
+    }
+
+    if (type === 'integer') {
+        if (normalizedName === 'offset') return 0;
+        if (normalizedName === 'page') return 1;
+        if (normalizedName === 'limit') return 10;
+        return 1;
+    }
+
+    if (type === 'number') {
+        if (normalizedName.includes('amount') || normalizedName.includes('price') || normalizedName.includes('total')) return 19.99;
+        return 1;
+    }
+
+    if (type === 'array') {
+        if (normalizedName.includes('operand')) return [1, 2];
+        return null;
+    }
+
+    if (type === 'string') {
+        if (normalizedName === 'id' || normalizedName.endsWith('_id') || normalizedName.endsWith('id')) return '1';
+        if (normalizedName.includes('password')) return 'password123';
+        if (normalizedName.includes('username')) return 'sample_user';
+        if (normalizedName.includes('name')) return 'Sample Name';
+        if (normalizedName === 'sort' || normalizedName.includes('sort_by')) return 'created_at';
+        if (normalizedName.includes('priority')) return 'medium';
+        if (normalizedName.includes('title')) return 'Buy groceries';
+        if (normalizedName.includes('description')) return 'Sample description';
+        if (normalizedName.includes('expression')) return '2+2*3';
+        if (normalizedName.includes('operator')) return '+';
+        if (normalizedName.includes('phone')) return '+1234567890';
+        return 'sample';
+    }
+
+    return null;
+}
+
+function buildPatternSample(pattern) {
+    if (typeof pattern !== 'string' || !pattern.trim()) return null;
+    const trimmed = pattern.trim();
+    const alternationMatch = trimmed.match(/^\^\(([^)]+)\)\$$/);
+    if (alternationMatch) {
+        const [firstChoice] = alternationMatch[1].split('|').map((part) => part.trim()).filter(Boolean);
+        return firstChoice || null;
+    }
+    return null;
+}
+
+function buildExampleFromSchema(schema, openApi, depth = 0, schemaName = '') {
+    const resolved = dereferenceSchema(schema, openApi);
+    if (!resolved || depth > 3) return null;
+    if (resolved.example !== undefined) return resolved.example;
+    if (Array.isArray(resolved.examples) && resolved.examples.length) return resolved.examples[0];
+    if (resolved.default !== undefined) return resolved.default;
+
+    if (Array.isArray(resolved.enum) && resolved.enum.length) return resolved.enum[0];
+    if (resolved.pattern) {
+        const patternExample = buildPatternSample(resolved.pattern);
+        if (patternExample != null) return patternExample;
+    }
+
+    switch (resolved.type) {
+        case 'object': {
+            const entries = Object.entries(resolved.properties || {});
+            const next = {};
+            for (const [key, value] of entries) {
+                const exampleValue = buildExampleFromSchema(value, openApi, depth + 1, key);
+                next[key] = exampleValue ?? '';
+            }
+            return next;
+        }
+        case 'array': {
+            const namedExample = buildNamedSampleValue(schemaName, resolved);
+            if (namedExample != null) return namedExample;
+            const itemExample = buildExampleFromSchema(resolved.items, openApi, depth + 1, schemaName);
+            return itemExample == null ? [] : [itemExample];
+        }
+        case 'integer':
+            return buildNamedSampleValue(schemaName, resolved) ?? 1;
+        case 'number':
+            return buildNamedSampleValue(schemaName, resolved) ?? 1;
+        case 'boolean':
+            return buildNamedSampleValue(schemaName, resolved) ?? true;
+        case 'string':
+            return buildNamedSampleValue(schemaName, resolved) ?? 'sample';
+        default:
+            return null;
+    }
+}
+
+function buildParameterPlaceholder(parameter, openApi) {
+    if (parameter?.example !== undefined) return String(parameter.example);
+    const exampleFromSchema = buildExampleFromSchema(parameter?.schema, openApi, 0, parameter?.name || '');
+    if (exampleFromSchema == null) return '';
+    return typeof exampleFromSchema === 'object'
+        ? JSON.stringify(exampleFromSchema)
+        : String(exampleFromSchema);
+}
+
+function buildParameterLabel(parameter) {
+    const location = parameter?.in ? ` (${parameter.in})` : '';
+    return `${parameter?.name || 'value'}${location}`;
+}
+
+function buildParameterDescription(parameter) {
+    const bits = [];
+    if (parameter?.required) bits.push('Required');
+    if (parameter?.description) bits.push(parameter.description);
+    return bits.join(' · ');
+}
+
+function getJsonRequestBodySchema(operation, openApi) {
+    const content = operation?.requestBody?.content;
+    if (!content || typeof content !== 'object') return null;
+    const jsonEntry = content['application/json'] || Object.entries(content).find(([key]) => key.includes('json'))?.[1];
+    if (!jsonEntry) return null;
+    return dereferenceSchema(jsonEntry.schema, openApi);
+}
+
+function mergeOperationParameters(pathItem, operation) {
+    const combined = [...(pathItem?.parameters || []), ...(operation?.parameters || [])];
+    const seen = new Set();
+    return combined.filter((parameter) => {
+        const key = `${parameter?.in || ''}:${parameter?.name || ''}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function buildTesterEndpoints(openApi) {
+    const paths = openApi?.paths;
+    if (!paths || typeof paths !== 'object') return [];
+
+    const endpoints = [];
+    for (const [path, pathItem] of Object.entries(paths)) {
+        for (const method of SANDBOX_TESTABLE_METHODS) {
+            const operation = pathItem?.[method.toLowerCase()];
+            if (!operation) continue;
+
+            const parameters = mergeOperationParameters(pathItem, operation);
+            const requestBodySchema = getJsonRequestBodySchema(operation, openApi);
+            const requestBodyExample = requestBodySchema ? buildExampleFromSchema(requestBodySchema, openApi, 0, operation.operationId || path) : null;
+
+            endpoints.push({
+                id: operation.operationId || `${method}-${path}`,
+                method,
+                path,
+                description: operation.summary || operation.description || 'Call this endpoint against the live sandbox.',
+                parameters: parameters.map((parameter) => ({
+                    name: parameter.name,
+                    in: parameter.in,
+                    required: Boolean(parameter.required || parameter.in === 'path'),
+                    label: buildParameterLabel(parameter),
+                    description: buildParameterDescription(parameter),
+                    placeholder: buildParameterPlaceholder(parameter, openApi),
+                })),
+                requestBodyRequired: Boolean(operation?.requestBody?.required),
+                requestBodyExample,
+            });
+        }
+    }
+
+    return endpoints;
+}
+
+function formatEndpointStatus(statusCode, ok) {
+    if (!statusCode) return ok ? 'Success' : 'Response';
+    return `${statusCode} ${ok ? 'OK' : 'Error'}`;
+}
+
+function getStatusBadgeStyle(statusCode) {
+    if (statusCode >= 200 && statusCode < 300) {
+        return { background: 'rgba(34, 197, 94, 0.12)', color: '#22c55e' };
+    }
+    if (statusCode >= 400) {
+        return { background: 'rgba(248, 113, 113, 0.14)', color: '#f87171' };
+    }
+    return { background: 'rgba(96, 165, 250, 0.14)', color: '#60a5fa' };
+}
 
 /* ─── Endpoint Card ─── */
-function EndpointCard({ ep }) {
-    const [inputVal, setInputVal] = useState('');
+function EndpointCard({ ep, threadId, sandboxReady, onRequireSandbox, modeledFallback = false }) {
+    const [paramValues, setParamValues] = useState(() => Object.fromEntries(
+        (ep?.parameters || []).map((parameter) => [parameter.name, parameter.placeholder || ''])
+    ));
+    const [bodyText, setBodyText] = useState(() => (
+        ep?.requestBodyExample != null ? JSON.stringify(ep.requestBodyExample, null, 2) : ''
+    ));
     const [response, setResponse] = useState(null);
     const [loading, setLoading] = useState(false);
+    const [showRawJson, setShowRawJson] = useState(false);
+    const [errorText, setErrorText] = useState('');
+
+    useEffect(() => {
+        setParamValues(Object.fromEntries((ep?.parameters || []).map((parameter) => [parameter.name, parameter.placeholder || ''])));
+        setBodyText(ep?.requestBodyExample != null ? JSON.stringify(ep.requestBodyExample, null, 2) : '');
+        setResponse(null);
+        setShowRawJson(false);
+        setErrorText('');
+    }, [ep]);
+
+    const parseApiResponse = (value) => {
+        if (value == null) return null;
+        if (typeof value === 'string') {
+            try {
+                return JSON.parse(value);
+            } catch {
+                return value;
+            }
+        }
+        return value;
+    };
+
+    const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+    const isPrimitiveValue = (value) => value == null || ['string', 'number', 'boolean'].includes(typeof value);
+    const renderCellValue = (value) => {
+        if (value == null) return '—';
+        if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+        if (isPlainObject(value) || Array.isArray(value)) return JSON.stringify(value);
+        return String(value);
+    };
+
+    const renderFriendlyResponse = (value) => {
+        const parsed = parseApiResponse(value);
+        if (parsed == null) {
+            return <div className="ep-friendly-empty">No response body.</div>;
+        }
+
+        const renderTable = (rows) => {
+            const keys = [...new Set(rows.flatMap((row) => (isPlainObject(row) ? Object.keys(row) : [])))];
+            if (!keys.length) {
+                return <div className="ep-friendly-empty">No tabular fields available.</div>;
+            }
+            return (
+                <div className="ep-friendly-table-wrap">
+                    <table className="ep-friendly-table">
+                        <thead>
+                            <tr>
+                                {keys.map((key) => <th key={key}>{key.replace(/_/g, ' ')}</th>)}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows.map((row, index) => (
+                                <tr key={index}>
+                                    {keys.map((key) => <td key={key}>{renderCellValue(row?.[key])}</td>)}
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            );
+        };
+
+        if (Array.isArray(parsed)) {
+            return (
+                parsed.length && parsed.every((row) => isPlainObject(row))
+                    ? renderTable(parsed)
+                    : (
+                        <div className="ep-friendly-list">
+                            {parsed.length ? parsed.map((item, index) => (
+                                <div key={index} className="ep-friendly-list-item">{renderCellValue(item)}</div>
+                            )) : <div className="ep-friendly-empty">No items returned.</div>}
+                        </div>
+                    )
+            );
+        }
+
+        if (!isPlainObject(parsed)) {
+            return <div className="ep-friendly-value">{renderCellValue(parsed)}</div>;
+        }
+
+        const leadMessage = typeof parsed.message === 'string' ? parsed.message.trim() : '';
+        const payload =
+            Object.prototype.hasOwnProperty.call(parsed, 'data') ? parsed.data
+                : Object.prototype.hasOwnProperty.call(parsed, 'result') ? parsed.result
+                    : Object.prototype.hasOwnProperty.call(parsed, 'value') ? parsed.value
+                        : parsed;
+        const scalarEntries = isPlainObject(payload)
+            ? Object.entries(payload).filter(([, entryValue]) => isPrimitiveValue(entryValue))
+            : [];
+        const nestedEntries = isPlainObject(payload)
+            ? Object.entries(payload).filter(([, entryValue]) => !isPrimitiveValue(entryValue))
+            : [];
+
+        return (
+            <div className="ep-friendly">
+                {leadMessage && <div className="ep-friendly-message">{leadMessage}</div>}
+
+                {Array.isArray(payload) && (
+                    payload.length && payload.every((row) => isPlainObject(row))
+                        ? renderTable(payload)
+                        : (
+                            <div className="ep-friendly-list">
+                                {payload.length ? payload.map((item, index) => (
+                                    <div key={index} className="ep-friendly-list-item">{renderCellValue(item)}</div>
+                                )) : <div className="ep-friendly-empty">No items returned.</div>}
+                            </div>
+                        )
+                )}
+
+                {!Array.isArray(payload) && isPrimitiveValue(payload) && !leadMessage && (
+                    <div className="ep-friendly-value">{renderCellValue(payload)}</div>
+                )}
+
+                {!Array.isArray(payload) && scalarEntries.length > 0 && (
+                    <div className="ep-friendly-kv">
+                        {scalarEntries.map(([key, entryValue]) => (
+                            <div key={key} className="ep-friendly-kv-row">
+                                <span className="ep-friendly-kv-key">{key.replace(/_/g, ' ')}</span>
+                                <span className="ep-friendly-kv-value">{renderCellValue(entryValue)}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                {!Array.isArray(payload) && nestedEntries.map(([key, entryValue]) => (
+                    <div key={key} className="ep-friendly-section">
+                        <div className="ep-friendly-section-title">{key.replace(/_/g, ' ')}</div>
+                        {Array.isArray(entryValue) && entryValue.every((row) => isPlainObject(row))
+                            ? renderTable(entryValue)
+                            : <pre className="ep-friendly-json-snippet">{JSON.stringify(entryValue, null, 2)}</pre>}
+                    </div>
+                ))}
+            </div>
+        );
+    };
+
+    const responsePayload = response?.body ?? response?.text ?? null;
+
+    const rawResponseText = (() => {
+        const parsed = parseApiResponse(responsePayload);
+        if (typeof parsed === 'string') return parsed;
+        return JSON.stringify(parsed, null, 2);
+    })();
 
     const handleTry = async () => {
+        if (!threadId) return;
+        if (modeledFallback && ep?.mockMode) {
+            setLoading(true);
+            setResponse(null);
+            setShowRawJson(false);
+            setErrorText('');
+            try {
+                let parsedBody = null;
+                if (bodyText.trim()) {
+                    try {
+                        parsedBody = JSON.parse(bodyText);
+                    } catch {
+                        throw new Error('Request body must be valid JSON.');
+                    }
+                } else if (ep.requestBodyRequired) {
+                    throw new Error('Request body is required.');
+                }
+                void parsedBody;
+                setResponse({
+                    ok: true,
+                    status_code: ep.mockStatusCode || 200,
+                    content_type: 'application/json',
+                    body: ep.mockResponse ?? { detail: 'Modeled sample response unavailable.' },
+                });
+            } catch (error) {
+                setErrorText(String(error?.message || error || 'Unable to render modeled sample response.'));
+            } finally {
+                setLoading(false);
+            }
+            return;
+        }
+        if (!sandboxReady) {
+            onRequireSandbox?.();
+            return;
+        }
+
         setLoading(true);
         setResponse(null);
-        await new Promise(r => setTimeout(r, 700));
-        setLoading(false);
-        setResponse(ep.mockResponse);
+        setShowRawJson(false);
+        setErrorText('');
+
+        try {
+            const pathParams = {};
+            const queryParams = {};
+            for (const parameter of ep.parameters || []) {
+                const rawValue = String(paramValues[parameter.name] ?? '').trim();
+                if (!rawValue) {
+                    if (parameter.required) {
+                        throw new Error(`${parameter.name} is required.`);
+                    }
+                    continue;
+                }
+                if (parameter.in === 'path') pathParams[parameter.name] = rawValue;
+                if (parameter.in === 'query') queryParams[parameter.name] = rawValue;
+            }
+
+            let jsonBody = null;
+            if (bodyText.trim()) {
+                try {
+                    jsonBody = JSON.parse(bodyText);
+                } catch {
+                    throw new Error('Request body must be valid JSON.');
+                }
+            } else if (ep.requestBodyRequired) {
+                throw new Error('Request body is required.');
+            }
+
+            const apiResponse = await fetch(`${getBackendBaseUrl()}/api/v1/sandbox/proxy-by-thread/${encodeURIComponent(threadId)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    method: ep.method,
+                    path: ep.path,
+                    path_params: pathParams,
+                    query_params: queryParams,
+                    json_body: jsonBody,
+                }),
+            });
+
+            let payload = null;
+            try {
+                payload = await apiResponse.json();
+            } catch {
+                payload = null;
+            }
+
+            if (!apiResponse.ok) {
+                const detail = payload?.detail || `Request failed (${apiResponse.status})`;
+                throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+            }
+
+            setResponse(payload);
+        } catch (error) {
+            setErrorText(String(error?.message || error || 'Request failed.'));
+        } finally {
+            setLoading(false);
+        }
     };
 
     return (
@@ -408,23 +896,54 @@ function EndpointCard({ ep }) {
                 <code className="ep-path">{ep.path}</code>
             </div>
             <p className="ep-desc">{ep.description}</p>
-            {ep.inputLabel && (
+            {(ep.parameters || []).map((parameter) => (
+                <div key={`${ep.id}:${parameter.in}:${parameter.name}`} className="ep-input-wrap">
+                    <label className="ep-input-label">{parameter.label}</label>
+                    {parameter.description && <div className="ep-input-hint">{parameter.description}</div>}
+                    <input
+                        className="ep-input"
+                        value={paramValues[parameter.name] || ''}
+                        onChange={(event) => setParamValues((current) => ({ ...current, [parameter.name]: event.target.value }))}
+                        placeholder={parameter.placeholder}
+                        spellCheck={false}
+                    />
+                </div>
+            ))}
+            {(ep.requestBodyExample != null || ep.requestBodyRequired) && (
                 <div className="ep-input-wrap">
-                    <label className="ep-input-label">{ep.inputLabel}</label>
-                    <input className="ep-input" value={inputVal} onChange={e => setInputVal(e.target.value)} placeholder={ep.placeholder} spellCheck={false} />
+                    <label className="ep-input-label">JSON body</label>
+                    <textarea
+                        className="ep-input ep-textarea"
+                        value={bodyText}
+                        onChange={(event) => setBodyText(event.target.value)}
+                        placeholder='{"key":"value"}'
+                        spellCheck={false}
+                    />
                 </div>
             )}
+            {errorText && <div className="ep-error">{errorText}</div>}
             <button className={`ep-try-btn${loading ? ' loading' : ''}`} onClick={handleTry} disabled={loading}>
-                {loading ? <span className="ep-spinner" /> : <><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21" /></svg>Try it</>}
+                {loading ? <span className="ep-spinner" /> : <><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21" /></svg>{modeledFallback ? 'Try sample output' : (sandboxReady ? 'Try it' : 'Start sandbox to test')}</>}
             </button>
             <AnimatePresence>
                 {response && (
                     <motion.div className="ep-response" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.2 }}>
                         <div className="ep-response-header">
-                            <span className="ep-status-badge">200 OK</span>
+                            <span className="ep-status-badge" style={getStatusBadgeStyle(response?.status_code || 0)}>
+                                {formatEndpointStatus(response?.status_code || 0, response?.ok)}
+                            </span>
                             <span className="ep-response-label">Response</span>
+                            <button type="button" className="ep-response-toggle" onClick={() => setShowRawJson((current) => !current)}>
+                                {showRawJson ? 'View friendly' : 'View JSON'}
+                            </button>
                         </div>
-                        <pre className="ep-response-body">{response}</pre>
+                        {showRawJson ? (
+                            <pre className="ep-response-body">{rawResponseText}</pre>
+                        ) : (
+                            <div className="ep-response-friendly">
+                                {renderFriendlyResponse(responsePayload)}
+                            </div>
+                        )}
                     </motion.div>
                 )}
             </AnimatePresence>
@@ -755,7 +1274,7 @@ function buildMermaidCandidates(input) {
                 rewriteUnsupportedDottedLabeledEdges(
                     normalizeMermaidEdgeLabelText(
                         stripFlowchartNotes(
-                    normalizeMermaidLines(normalizeMermaidCode(input))
+                            normalizeMermaidLines(normalizeMermaidCode(input))
                         )
                     )
                 )
@@ -1082,18 +1601,127 @@ function SchemaVisualizer({ content }) {
         </div>
     );
 }
+
+function ZoomablePreview({ children, resetKey }) {
+    const [scale, setScale] = useState(1);
+    const [offset, setOffset] = useState({ x: 0, y: 0 });
+    const [isPanning, setIsPanning] = useState(false);
+    const viewportRef = useRef(null);
+    const panStateRef = useRef(null);
+
+    useEffect(() => {
+        setScale(1);
+        setOffset({ x: 0, y: 0 });
+        setIsPanning(false);
+        panStateRef.current = null;
+    }, [resetKey]);
+
+    useEffect(() => {
+        const handlePointerMove = (event) => {
+            const panState = panStateRef.current;
+            if (!panState) return;
+            setOffset({
+                x: panState.startOffset.x + (event.clientX - panState.startPointer.x),
+                y: panState.startOffset.y + (event.clientY - panState.startPointer.y),
+            });
+        };
+
+        const finishPan = () => {
+            if (!panStateRef.current) return;
+            panStateRef.current = null;
+            setIsPanning(false);
+        };
+
+        window.addEventListener('pointermove', handlePointerMove);
+        window.addEventListener('pointerup', finishPan);
+        window.addEventListener('pointercancel', finishPan);
+        return () => {
+            window.removeEventListener('pointermove', handlePointerMove);
+            window.removeEventListener('pointerup', finishPan);
+            window.removeEventListener('pointercancel', finishPan);
+        };
+    }, []);
+
+    const updateScale = useCallback((targetScale, anchor) => {
+        const viewport = viewportRef.current;
+        if (!viewport) return;
+        const nextScale = Math.max(0.55, Math.min(2.4, targetScale));
+        if (Math.abs(nextScale - scale) < 0.001) return;
+
+        const rect = viewport.getBoundingClientRect();
+        const point = anchor || {
+            x: rect.width / 2,
+            y: rect.height / 2,
+        };
+
+        const ratio = nextScale / scale;
+        setOffset((prev) => ({
+            x: point.x - ((point.x - prev.x) * ratio),
+            y: point.y - ((point.y - prev.y) * ratio),
+        }));
+        setScale(nextScale);
+    }, [scale]);
+
+    const handlePointerDown = (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        panStateRef.current = {
+            startPointer: { x: event.clientX, y: event.clientY },
+            startOffset: offset,
+        };
+        setIsPanning(true);
+    };
+
+    const handleWheel = (event) => {
+        event.preventDefault();
+        const viewport = viewportRef.current;
+        if (!viewport) return;
+        const rect = viewport.getBoundingClientRect();
+        const direction = event.deltaY < 0 ? 1.12 : 0.89;
+        updateScale(scale * direction, {
+            x: event.clientX - rect.left,
+            y: event.clientY - rect.top,
+        });
+    };
+
+    return (
+        <div className="cp-zoom-preview">
+            <div className="cp-zoom-toolbar">
+                <button type="button" className="cp-zoom-btn" onClick={() => updateScale(scale / 1.12)} aria-label="Zoom out">-</button>
+                <button type="button" className="cp-zoom-btn cp-zoom-readout" onClick={() => { setScale(1); setOffset({ x: 0, y: 0 }); }}>
+                    {Math.round(scale * 100)}%
+                </button>
+                <button type="button" className="cp-zoom-btn" onClick={() => updateScale(scale * 1.12)} aria-label="Zoom in">+</button>
+            </div>
+            <div
+                ref={viewportRef}
+                className={`cp-zoom-viewport${isPanning ? ' is-panning' : ''}`}
+                onPointerDown={handlePointerDown}
+                onWheel={handleWheel}
+            >
+                <div className="cp-zoom-pan" style={{ transform: `translate(${offset.x}px, ${offset.y}px)` }}>
+                    <div className="cp-zoom-scale" style={{ transform: `scale(${scale})` }}>
+                        {children}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 export default function ChatPage({ theme, onThemeToggle }) {
     const { user, logout } = useAuth();
     const navigate = useNavigate();
+    const { threadId: routeThreadId } = useParams();
 
     const [triggerMenu, setTriggerMenu] = useState(null);
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [selectedModel, setSelectedModel] = useState('pro');
     const [threads, setThreads] = useState([]);
-    const [activeThread, setActiveThread] = useState(() => localStorage.getItem('interius_active_thread'));
+    const [activeThread, setActiveThread] = useState(() => routeThreadId || localStorage.getItem(THREAD_STORAGE_KEY));
     const [messages, setMessages] = useState([]);
-    const [isMessagesLoading, setIsMessagesLoading] = useState(() => Boolean(localStorage.getItem('interius_active_thread')));
+    const [isMessagesLoading, setIsMessagesLoading] = useState(() => Boolean(routeThreadId || localStorage.getItem(THREAD_STORAGE_KEY)));
     const [input, setInput] = useState('');
     const [isTyping, setIsTyping] = useState(false);
     const [typingStep, setTypingStep] = useState(0);
@@ -1109,6 +1737,18 @@ export default function ChatPage({ theme, onThemeToggle }) {
     const [autoApprove, setAutoApprove] = useState(true);
     const [runtimePreviewFiles, setRuntimePreviewFiles] = useState({});
     const [copyPreviewStatus, setCopyPreviewStatus] = useState('idle');
+    const [sandboxStatus, setSandboxStatus] = useState('idle');
+    const [sandboxUrl, setSandboxUrl] = useState('');
+    const [sandboxThreadId, setSandboxThreadId] = useState('');
+    const [sandboxError, setSandboxError] = useState('');
+    const [sandboxLogs, setSandboxLogs] = useState('');
+    const [sandboxEndpoints, setSandboxEndpoints] = useState([]);
+    const [sandboxSpecStatus, setSandboxSpecStatus] = useState('idle');
+    const [sandboxSpecError, setSandboxSpecError] = useState('');
+    const [sandboxTesterMode, setSandboxTesterMode] = useState('live');
+    const [sandboxFallbackReason, setSandboxFallbackReason] = useState('');
+    const [sandboxDeployStartedAt, setSandboxDeployStartedAt] = useState(0);
+    const [panelWidths, setPanelWidths] = useState(PANEL_DEFAULT_WIDTHS);
 
     const modelDropdownRef = useRef(null);
 
@@ -1118,6 +1758,9 @@ export default function ChatPage({ theme, onThemeToggle }) {
     const isGeneratingRef = useRef(false);
     const activeStreamAbortRef = useRef(null);
     const copyResetTimeoutRef = useRef(null);
+    const panelResizeRef = useRef(null);
+    const deploySandboxForThreadRef = useRef(null);
+    const activeThreadRef = useRef(activeThread);
     const latestAgentMessage = [...messages].reverse().find((msg) => msg.type === 'agent');
     const latestAwaitingApprovalAgent = [...messages]
         .reverse()
@@ -1145,10 +1788,283 @@ export default function ChatPage({ theme, onThemeToggle }) {
         latestAgentMessage &&
         (latestAgentMessage.status === 'running' || latestAgentMessage.status === 'awaiting_approval')
     );
+    const currentPanelWidth = panelMode ? (panelWidths[panelMode] || PANEL_DEFAULT_WIDTHS[panelMode]) : 0;
+    const activeSandboxSwaggerUrl = sandboxStatus === 'running' && sandboxThreadId === activeThread ? sandboxUrl : '';
     const openTesterPanel = useCallback(() => {
         setPreviewFile(null);
         setPanelMode('tester');
     }, []);
+    const openSandboxPanel = useCallback(() => {
+        setPreviewFile(null);
+        setPanelMode('sandbox');
+    }, []);
+
+    const selectThread = useCallback((nextThreadId, { replaceHistory = true } = {}) => {
+        const normalized = nextThreadId || null;
+        const currentThreadId = activeThreadRef.current || null;
+
+        if (normalized === currentThreadId) {
+            if (normalized) {
+                localStorage.setItem(THREAD_STORAGE_KEY, normalized);
+                if (routeThreadId !== normalized) {
+                    navigate(`/chat/${normalized}`, { replace: replaceHistory });
+                }
+                return;
+            }
+
+            localStorage.removeItem(THREAD_STORAGE_KEY);
+            if (routeThreadId) {
+                navigate('/chat', { replace: replaceHistory });
+            }
+            return;
+        }
+
+        if (normalized) {
+            localStorage.setItem(THREAD_STORAGE_KEY, normalized);
+            setIsMessagesLoading(true);
+            setActiveThread(normalized);
+            if (routeThreadId !== normalized) {
+                navigate(`/chat/${normalized}`, { replace: replaceHistory });
+            }
+            return;
+        }
+
+        localStorage.removeItem(THREAD_STORAGE_KEY);
+        setActiveThread(null);
+        setIsMessagesLoading(false);
+        if (routeThreadId) {
+            navigate('/chat', { replace: replaceHistory });
+        }
+    }, [navigate, routeThreadId]);
+
+    const loadSandboxOpenApiForThread = useCallback(async (threadId) => {
+        if (!threadId) {
+            setSandboxEndpoints([]);
+            setSandboxSpecStatus('idle');
+            setSandboxSpecError('');
+            return;
+        }
+
+        setSandboxSpecStatus('loading');
+        setSandboxSpecError('');
+        try {
+            const response = await fetch(`${getBackendBaseUrl()}/api/v1/sandbox/openapi-by-thread/${encodeURIComponent(threadId)}`);
+            let payload = null;
+            try {
+                payload = await response.json();
+            } catch {
+                payload = null;
+            }
+
+            if (!response.ok) {
+                const detail = payload?.detail || `OpenAPI load failed (${response.status})`;
+                throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+            }
+
+            if (activeThreadRef.current !== threadId) return;
+
+            const endpoints = buildTesterEndpoints(payload);
+            if (!endpoints.length) {
+                throw new Error('Live sandbox started, but no usable API endpoints were loaded. Check sandbox startup logs.');
+            }
+            setSandboxEndpoints(endpoints);
+            setSandboxSpecStatus('ready');
+            setSandboxSpecError('');
+        } catch (error) {
+            if (activeThreadRef.current !== threadId) return;
+            setSandboxEndpoints([]);
+            setSandboxSpecStatus('error');
+            setSandboxSpecError(String(error?.message || error || 'Failed to load sandbox API schema.'));
+        }
+    }, []);
+
+    const syncSandboxStatusForThread = useCallback(async (threadId, { loadSpec = true } = {}) => {
+        if (!threadId) {
+            setSandboxStatus('idle');
+            setSandboxUrl('');
+            setSandboxThreadId('');
+            setSandboxError('');
+            setSandboxLogs('');
+            setSandboxEndpoints([]);
+            setSandboxSpecStatus('idle');
+            setSandboxSpecError('');
+            return null;
+        }
+
+        try {
+            const response = await fetch(`${getBackendBaseUrl()}/api/v1/sandbox/status-by-thread/${encodeURIComponent(threadId)}`);
+            let payload = null;
+            try {
+                payload = await response.json();
+            } catch {
+                payload = null;
+            }
+
+            if (!response.ok) {
+                const detail = payload?.detail || `Sandbox status failed (${response.status})`;
+                throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+            }
+
+            if (activeThreadRef.current !== threadId) return;
+
+            const isRunning = payload?.status === 'running';
+            const nextUrl = payload?.swagger_url || '';
+
+            setSandboxThreadId(threadId);
+            setSandboxLogs(typeof payload?.logs === 'string' ? payload.logs : '');
+            setSandboxUrl(isRunning ? nextUrl : '');
+            setSandboxStatus(payload?.status || 'idle');
+            setSandboxError(payload?.status === 'error' ? (payload?.error || payload?.message || 'Sandbox failed to start.') : '');
+
+            if (isRunning && loadSpec) {
+                await loadSandboxOpenApiForThread(threadId);
+            } else if (!isRunning) {
+                setSandboxEndpoints([]);
+                setSandboxSpecStatus(payload?.status === 'deploying' ? 'loading' : 'idle');
+                setSandboxSpecError('');
+            }
+            return payload;
+        } catch (error) {
+            if (activeThreadRef.current !== threadId) return;
+            setSandboxStatus('error');
+            setSandboxUrl('');
+            setSandboxThreadId(threadId);
+            setSandboxError(String(error?.message || error || 'Failed to read sandbox status.'));
+            setSandboxLogs('');
+            setSandboxEndpoints([]);
+            setSandboxSpecStatus('error');
+            setSandboxSpecError(String(error?.message || error || 'Failed to read sandbox status.'));
+            return null;
+        }
+    }, [loadSandboxOpenApiForThread]);
+
+    const deploySandboxForThread = useCallback(async (threadId, { openOnSuccess = true } = {}) => {
+        if (!threadId) return;
+        if (sandboxStatus === 'deploying' && sandboxThreadId === threadId) return;
+        if (sandboxStatus === 'running' && sandboxUrl && sandboxThreadId === threadId) {
+            if (openOnSuccess) openSandboxPanel();
+            return;
+        }
+
+        setSandboxStatus('deploying');
+        setSandboxError('');
+        setSandboxLogs('');
+        try {
+            const response = await fetch(`${getBackendBaseUrl()}/api/v1/sandbox/deploy-by-thread/${encodeURIComponent(threadId)}`, {
+                method: 'POST',
+            });
+
+            let payload = null;
+            try {
+                payload = await response.json();
+            } catch {
+                payload = null;
+            }
+
+            if (!response.ok) {
+                const detail = payload?.detail || payload?.message || `Sandbox deploy failed (${response.status})`;
+                throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+            }
+
+            setSandboxThreadId(threadId);
+            setSandboxLogs(typeof payload?.logs === 'string' ? payload.logs : '');
+
+            if (payload?.status === 'error') {
+                setSandboxUrl('');
+                setSandboxStatus('error');
+                setSandboxError(payload?.error || payload?.message || 'Sandbox failed to start.');
+                setSandboxEndpoints([]);
+                setSandboxSpecStatus('error');
+                setSandboxSpecError(payload?.error || payload?.message || 'Sandbox failed to start.');
+                if (openOnSuccess) openSandboxPanel();
+                return;
+            }
+
+            const nextUrl = payload?.swagger_url || '';
+            setSandboxUrl(payload?.status === 'running' ? nextUrl : '');
+            setSandboxStatus(payload?.status === 'running' ? 'running' : 'deploying');
+            setSandboxError('');
+            if (payload?.status === 'running') {
+                await loadSandboxOpenApiForThread(threadId);
+            } else {
+                setSandboxEndpoints([]);
+                setSandboxSpecStatus('loading');
+                setSandboxSpecError('');
+            }
+            if (openOnSuccess) openSandboxPanel();
+        } catch (error) {
+            console.error('Sandbox deploy failed', error);
+            setSandboxUrl('');
+            setSandboxStatus('error');
+            setSandboxError(String(error?.message || error || 'Sandbox deploy failed.'));
+            setSandboxLogs('');
+            setSandboxEndpoints([]);
+            setSandboxSpecStatus('error');
+            setSandboxSpecError(String(error?.message || error || 'Sandbox deploy failed.'));
+            if (openOnSuccess) openSandboxPanel();
+        }
+    }, [loadSandboxOpenApiForThread, openSandboxPanel, sandboxStatus, sandboxThreadId, sandboxUrl]);
+
+    const openTesterPanelForThread = useCallback(async (threadId = activeThread) => {
+        openTesterPanel();
+        if (!threadId) return;
+        const latestStatus = await syncSandboxStatusForThread(threadId, { loadSpec: false });
+        if (activeThreadRef.current !== threadId || !latestStatus) return;
+
+        if (latestStatus?.status === 'running' && latestStatus?.swagger_url) {
+            if (!sandboxEndpoints.length || sandboxSpecStatus !== 'ready' || sandboxThreadId !== threadId || sandboxUrl !== latestStatus.swagger_url) {
+                await loadSandboxOpenApiForThread(threadId);
+            }
+            return;
+        }
+        if (latestStatus?.status === 'deploying') {
+            setSandboxSpecStatus('loading');
+            setSandboxSpecError('');
+            return;
+        }
+        void deploySandboxForThread(threadId, { openOnSuccess: false });
+    }, [activeThread, deploySandboxForThread, loadSandboxOpenApiForThread, openTesterPanel, sandboxEndpoints.length, sandboxSpecStatus, sandboxThreadId, sandboxUrl, syncSandboxStatusForThread]);
+
+    useEffect(() => {
+        const handlePointerMove = (event) => {
+            const resizeState = panelResizeRef.current;
+            if (!resizeState) return;
+            const width = resizeState.startWidth + (resizeState.startX - event.clientX);
+            setPanelWidths((prev) => ({
+                ...prev,
+                [resizeState.mode]: Math.max(PANEL_MIN_WIDTH, Math.min(PANEL_MAX_WIDTH, width)),
+            }));
+        };
+
+        const finishResize = () => {
+            if (!panelResizeRef.current) return;
+            panelResizeRef.current = null;
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+        };
+
+        window.addEventListener('pointermove', handlePointerMove);
+        window.addEventListener('pointerup', finishResize);
+        window.addEventListener('pointercancel', finishResize);
+        return () => {
+            window.removeEventListener('pointermove', handlePointerMove);
+            window.removeEventListener('pointerup', finishResize);
+            window.removeEventListener('pointercancel', finishResize);
+            finishResize();
+        };
+    }, []);
+
+    const beginPanelResize = useCallback((event) => {
+        if (!panelMode) return;
+        event.preventDefault();
+        panelResizeRef.current = {
+            mode: panelMode,
+            startX: event.clientX,
+            startWidth: panelWidths[panelMode] || PANEL_DEFAULT_WIDTHS[panelMode],
+        };
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+    }, [panelMode, panelWidths]);
 
     const buildResumeCheckpointFromMessage = (msg, promptText) => {
         if (!msg) return null;
@@ -1181,6 +2097,10 @@ export default function ChatPage({ theme, onThemeToggle }) {
         return 'all';
     };
 
+    useEffect(() => {
+        activeThreadRef.current = activeThread;
+    }, [activeThread]);
+
     useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, isTyping]);
     useEffect(() => {
         const cached = readThreadUiCache(activeThread);
@@ -1190,6 +2110,46 @@ export default function ChatPage({ theme, onThemeToggle }) {
         setPanelMode(null);
         setPreviewFile(null);
     }, [activeThread]);
+    useEffect(() => {
+        if (!activeThread) {
+            setSandboxStatus('idle');
+            setSandboxUrl('');
+            setSandboxThreadId('');
+            setSandboxError('');
+            setSandboxLogs('');
+            setSandboxEndpoints([]);
+            setSandboxSpecStatus('idle');
+            setSandboxSpecError('');
+            return;
+        }
+        setSandboxStatus('idle');
+        setSandboxUrl('');
+        setSandboxThreadId('');
+        setSandboxError('');
+        setSandboxLogs('');
+        setSandboxEndpoints([]);
+        setSandboxSpecStatus('loading');
+        setSandboxSpecError('');
+        syncSandboxStatusForThread(activeThread);
+    }, [activeThread, syncSandboxStatusForThread]);
+
+    useEffect(() => {
+        if (panelMode !== 'tester') return;
+        if (!activeThread) return;
+        if (sandboxStatus !== 'running' || sandboxThreadId !== activeThread || !sandboxUrl) return;
+        if (sandboxEndpoints.length > 0 && sandboxSpecStatus === 'ready') return;
+        if (sandboxSpecStatus === 'loading' || sandboxSpecStatus === 'error') return;
+        void loadSandboxOpenApiForThread(activeThread);
+    }, [
+        activeThread,
+        loadSandboxOpenApiForThread,
+        panelMode,
+        sandboxEndpoints.length,
+        sandboxSpecStatus,
+        sandboxStatus,
+        sandboxThreadId,
+        sandboxUrl,
+    ]);
 
     // Close model dropdown on outside click
     useEffect(() => {
@@ -1211,18 +2171,52 @@ export default function ChatPage({ theme, onThemeToggle }) {
             const { data } = await supabase.from('threads').select('*').order('created_at', { ascending: false });
             if (data) {
                 setThreads(data);
-                const saved = localStorage.getItem('interius_active_thread');
-                if (saved && data.some(t => t.id === saved)) {
-                    setActiveThread(saved);
-                } else if (saved) {
-                    localStorage.removeItem('interius_active_thread');
+                const preferredThreadId = routeThreadId || localStorage.getItem(THREAD_STORAGE_KEY);
+                if (preferredThreadId && data.some((thread) => thread.id === preferredThreadId)) {
+                    localStorage.setItem(THREAD_STORAGE_KEY, preferredThreadId);
+                    if (activeThreadRef.current !== preferredThreadId) {
+                        setIsMessagesLoading(true);
+                        setActiveThread(preferredThreadId);
+                    } else {
+                        setIsMessagesLoading(false);
+                    }
+                    if (routeThreadId !== preferredThreadId) {
+                        navigate(`/chat/${preferredThreadId}`, { replace: true });
+                    }
+                } else if (preferredThreadId) {
+                    localStorage.removeItem(THREAD_STORAGE_KEY);
+                    if (routeThreadId) navigate('/chat', { replace: true });
                     setActiveThread(null);
+                    setIsMessagesLoading(false);
+                } else {
                     setIsMessagesLoading(false);
                 }
             }
         };
         fetchThreads();
-    }, [user]);
+    }, [navigate, user]);
+
+    useEffect(() => {
+        if (!routeThreadId) return;
+        if (!threads.length) return;
+        if (!threads.some((thread) => thread.id === routeThreadId)) {
+            if (activeThreadRef.current === routeThreadId) {
+                setActiveThread(null);
+                setMessages([]);
+                setIsMessagesLoading(false);
+            }
+            localStorage.removeItem(THREAD_STORAGE_KEY);
+            navigate('/chat', { replace: true });
+            return;
+        }
+        if (routeThreadId === activeThreadRef.current) {
+            localStorage.setItem(THREAD_STORAGE_KEY, routeThreadId);
+            return;
+        }
+        localStorage.setItem(THREAD_STORAGE_KEY, routeThreadId);
+        setIsMessagesLoading(true);
+        setActiveThread(routeThreadId);
+    }, [navigate, routeThreadId, threads]);
 
     // Load messages when activeThread changes
     useEffect(() => {
@@ -1234,6 +2228,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
 
         if (isGeneratingRef.current) return;
         let cancelled = false;
+        setMessages([]);
         setIsMessagesLoading(true);
 
         const fetchMessages = async () => {
@@ -1345,14 +2340,14 @@ export default function ChatPage({ theme, onThemeToggle }) {
         clearAllInterfaceThreadContexts();
         clearAllThreadFileContexts();
         clearAllThreadUiCaches();
+        localStorage.removeItem(THREAD_STORAGE_KEY);
         logout();
         navigate('/');
     };
 
     const handleNewThread = () => {
         isGeneratingRef.current = false;
-        setActiveThread(null);
-        localStorage.removeItem('interius_active_thread');
+        selectThread(null);
         setMessages([]);
         setInput('');
         setAttachedFiles([]);
@@ -1368,8 +2363,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
         clearThreadUiCache(id);
         setThreads(t => t.filter(x => x.id !== id));
         if (activeThread === id) {
-            setActiveThread(null);
-            localStorage.removeItem('interius_active_thread');
+            selectThread(null);
             setMessages([]);
         }
         await supabase.from('threads').delete().eq('id', id);
@@ -1617,8 +2611,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                 threadId = data.id;
                 createdThreadThisSend = true;
                 setThreads(t => [data, ...t]);
-                setActiveThread(threadId);
-                localStorage.setItem('interius_active_thread', threadId);
+                selectThread(threadId);
             } else {
                 console.error("Failed to create thread", error);
                 return;
@@ -1707,9 +2700,9 @@ export default function ChatPage({ theme, onThemeToggle }) {
                     const architectureFiles = artifactDocFiles.filter((p) => /architecture (design\.md|diagram\.mmd)$/i.test(String(p)));
                     const selectedFiles =
                         retrievalTarget === 'requirements' ? requirementsFiles :
-                        retrievalTarget === 'architecture' ? architectureFiles :
-                        retrievalTarget === 'code_bundle' ? codeFiles :
-                        sourceFilesAll;
+                            retrievalTarget === 'architecture' ? architectureFiles :
+                                retrievalTarget === 'code_bundle' ? codeFiles :
+                                    sourceFilesAll;
                     const selectedGeneratedFileMap =
                         retrievalTarget === 'requirements' || retrievalTarget === 'architecture'
                             ? {}
@@ -1854,8 +2847,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                         threadId = nextThreadId;
                         createdThreadThisSend = true;
                         setThreads((curr) => [forkThread, ...curr]);
-                        setActiveThread(nextThreadId);
-                        localStorage.setItem('interius_active_thread', nextThreadId);
+                        selectThread(nextThreadId);
                         setMessages([
                             {
                                 type: 'user',
@@ -1969,7 +2961,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                     setAgentProgress({ phase: 1, stepIndex: 1, isStreaming: true, status: 'running', stageTimings: streamStageTimings });
                                 } else if (stage === 'implementer') {
                                     setAgentProgress({ phase: 2, stepIndex: 0, isStreaming: true, status: 'running', stageTimings: streamStageTimings });
-                                } else if (stage === 'reviewer' || stage === 'tester') {
+                                } else if (stage === 'reviewer' || stage === 'repairer' || stage === 'tester') {
                                     setAgentProgress({ phase: 2, stepIndex: 1, isStreaming: true, status: 'running', stageTimings: streamStageTimings });
                                 }
                                 return;
@@ -1994,7 +2986,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                     setAgentProgress({ phase: 2, stepIndex: 0, stageTimings: streamStageTimings });
                                 } else if (stage === 'implementer') {
                                     setAgentProgress({ phase: 2, stepIndex: 1, stageTimings: streamStageTimings });
-                                } else if (stage === 'reviewer' || stage === 'tester') {
+                                } else if (stage === 'reviewer' || stage === 'repairer' || stage === 'tester') {
                                     setAgentProgress({ phase: 2, stepIndex: 2, stageTimings: streamStageTimings });
                                 }
                                 return;
@@ -2042,7 +3034,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                 };
                                 upsertRuntimePreviewFiles(
                                     Object.entries(fileMap).map(([path, content]) => ({ path, content }))
-                                , threadId);
+                                    , threadId);
                                 setAgentProgress({
                                     files: streamGeneratedFileList,
                                     generatedFileMap: streamGeneratedFileMap,
@@ -2054,29 +3046,12 @@ export default function ChatPage({ theme, onThemeToggle }) {
                             }
 
                             if (status === 'review_update') {
-                                const kind = event.kind || 'info';
-                                const affectedFiles = Array.isArray(event.affected_files)
-                                    ? event.affected_files.filter(Boolean)
-                                    : [];
-                                const artifact = event.artifact || {};
-                                let noteText = (event.message || '').trim();
-
-                                if (!noteText && kind === 'tests') {
-                                    const failures = Array.isArray(artifact.failures) ? artifact.failures.length : 0;
-                                    noteText = failures
-                                        ? `Smoke tests found ${failures} issue(s).`
-                                        : 'Smoke tests completed.';
-                                }
-
-                                if (affectedFiles.length && kind === 'revision') {
-                                    noteText = `${noteText} (${affectedFiles.join(', ')})`.trim();
-                                }
-
-                                if (noteText) {
+                                const noteData = buildReviewUpdateNote(event);
+                                if (noteData?.text) {
                                     const note = {
                                         id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-                                        kind,
-                                        text: noteText,
+                                        kind: noteData.kind,
+                                        text: noteData.text,
                                     };
                                     streamReviewUpdates = [...streamReviewUpdates.slice(-5), note];
                                     setAgentProgress({
@@ -2245,22 +3220,22 @@ export default function ChatPage({ theme, onThemeToggle }) {
                             threadId,
                             messageId: savedAgentMessage.id,
                             userId: user.id,
-                                agentState: {
-                                    isStreaming: false,
-                                    status: 'completed',
-                                    phase: 2,
-                                    stepIndex: 99,
-                                    text: streamFinalSummary || AGENT_FINAL.text,
-                                    files: [...new Set([...streamArtifactDocFiles, ...streamGeneratedFileList])],
-                                    generatedFileMap: streamGeneratedFileMap,
-                                    runMode: 'real',
-                                    stageTimings: streamStageTimings,
-                                    reviewUpdates: streamReviewUpdates,
-                                    requirementsArtifact: streamRequirementsArtifact,
-                                    architectureArtifact: streamArchitectureArtifact,
-                                },
-                                previewFiles: streamPreviewFiles,
-                            });
+                            agentState: {
+                                isStreaming: false,
+                                status: 'completed',
+                                phase: 2,
+                                stepIndex: 99,
+                                text: streamFinalSummary || AGENT_FINAL.text,
+                                files: [...new Set([...streamArtifactDocFiles, ...streamGeneratedFileList])],
+                                generatedFileMap: streamGeneratedFileMap,
+                                runMode: 'real',
+                                stageTimings: streamStageTimings,
+                                reviewUpdates: streamReviewUpdates,
+                                requirementsArtifact: streamRequirementsArtifact,
+                                architectureArtifact: streamArchitectureArtifact,
+                            },
+                            previewFiles: streamPreviewFiles,
+                        });
                     }
                     appendInterfaceThreadContext(threadId, { role: 'agent', content: streamFinalSummary || AGENT_FINAL.text });
 
@@ -2278,7 +3253,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                 ? {
                                     ...msg,
                                     isStreaming: false,
-                                    status: 'completed',
+                                    status: 'error',
                                     text: stoppedText,
                                     runMode: 'real',
                                     reviewUpdates: [
@@ -2291,7 +3266,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                         writeThreadUiCache(threadId, {
                             latestRealAgent: {
                                 isStreaming: false,
-                                status: 'completed',
+                                status: 'error',
                                 text: stoppedText,
                                 runMode: 'real',
                             }
@@ -2312,7 +3287,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                 ? {
                                     ...msg,
                                     isStreaming: false,
-                                    status: 'completed',
+                                    status: 'error',
                                     text: errorText,
                                     runMode: 'real',
                                 }
@@ -2321,11 +3296,11 @@ export default function ChatPage({ theme, onThemeToggle }) {
                         writeThreadUiCache(threadId, {
                             latestRealAgent: {
                                 isStreaming: false,
-                                status: 'completed',
-                                    text: errorText,
-                                    runMode: 'real',
-                                    stageTimings: streamStageTimings,
-                                }
+                                status: 'error',
+                                text: errorText,
+                                runMode: 'real',
+                                stageTimings: streamStageTimings,
+                            }
                         });
                         const { data: savedFailedRealAgent, error: saveFailedRealAgentError } = await supabase.from('messages').insert({
                             thread_id: threadId,
@@ -2342,7 +3317,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                 userId: user.id,
                                 agentState: {
                                     isStreaming: false,
-                                    status: 'completed',
+                                    status: 'error',
                                     text: errorText,
                                     runMode: 'real',
                                     stageTimings: streamStageTimings,
@@ -2364,7 +3339,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                 ? {
                                     ...msg,
                                     isStreaming: false,
-                                    status: 'completed',
+                                    status: 'error',
                                     text: partialText,
                                     runMode: 'real',
                                 }
@@ -2373,7 +3348,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                         writeThreadUiCache(threadId, {
                             latestRealAgent: {
                                 isStreaming: false,
-                                status: 'completed',
+                                status: 'error',
                                 text: partialText,
                                 runMode: 'real',
                             }
@@ -2394,7 +3369,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                 agentState: {
                                     ...(cacheAfterFailure?.latestRealAgent || {}),
                                     isStreaming: false,
-                                    status: 'completed',
+                                    status: 'error',
                                     text: partialText,
                                     runMode: 'real',
                                 },
@@ -2538,7 +3513,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                             };
                             if (stage === 'implementer') {
                                 setMessages(curr => curr.map(msg => msg.id === msgId ? { ...msg, phase: 2, stepIndex: 0, isStreaming: true, status: 'running', stageTimings: streamStageTimings } : msg));
-                            } else if (stage === 'reviewer' || stage === 'tester') {
+                            } else if (stage === 'reviewer' || stage === 'repairer' || stage === 'tester') {
                                 setMessages(curr => curr.map(msg => msg.id === msgId ? { ...msg, phase: 2, stepIndex: 1, isStreaming: true, status: 'running', stageTimings: streamStageTimings } : msg));
                             }
                             return;
@@ -2559,7 +3534,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                             };
                             if (stage === 'implementer') {
                                 setMessages(curr => curr.map(msg => msg.id === msgId ? { ...msg, phase: 2, stepIndex: 1, stageTimings: streamStageTimings } : msg));
-                            } else if (stage === 'reviewer' || stage === 'tester') {
+                            } else if (stage === 'reviewer' || stage === 'repairer' || stage === 'tester') {
                                 setMessages(curr => curr.map(msg => msg.id === msgId ? { ...msg, phase: 2, stepIndex: 2, stageTimings: streamStageTimings } : msg));
                             }
                             return;
@@ -2586,14 +3561,13 @@ export default function ChatPage({ theme, onThemeToggle }) {
                         }
 
                         if (status === 'review_update') {
-                            const kind = event.kind || 'info';
-                            const affectedFiles = Array.isArray(event.affected_files) ? event.affected_files.filter(Boolean) : [];
-                            let noteText = (event.message || '').trim();
-                            if (affectedFiles.length && kind === 'revision') {
-                                noteText = `${noteText} (${affectedFiles.join(', ')})`.trim();
-                            }
-                            if (noteText) {
-                                const note = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, kind, text: noteText };
+                            const noteData = buildReviewUpdateNote(event);
+                            if (noteData?.text) {
+                                const note = {
+                                    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                                    kind: noteData.kind,
+                                    text: noteData.text,
+                                };
                                 streamReviewUpdates = [...streamReviewUpdates.slice(-5), note];
                                 setMessages(curr => curr.map(msg => msg.id === msgId ? { ...msg, reviewUpdates: streamReviewUpdates } : msg));
                             }
@@ -2690,7 +3664,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                     setMessages(curr => curr.map(msg => msg.id === msgId ? {
                         ...msg,
                         isStreaming: false,
-                        status: 'completed',
+                        status: 'error',
                         text: 'Interius stopped the pipeline at your request.',
                         reviewUpdates: [
                             ...(Array.isArray(msg.reviewUpdates) ? msg.reviewUpdates.slice(-4) : []),
@@ -2932,9 +3906,7 @@ export default function ChatPage({ theme, onThemeToggle }) {
                             onClick={() => {
                                 if (editingThreadId === t.id) return;
                                 isGeneratingRef.current = false;
-                                localStorage.setItem('interius_active_thread', t.id);
-                                setIsMessagesLoading(true);
-                                setActiveThread(t.id);
+                                selectThread(t.id, { replaceHistory: false });
                             }}
                         >
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M5 6h14M5 12h10M5 18h7" /></svg>
@@ -3024,12 +3996,12 @@ export default function ChatPage({ theme, onThemeToggle }) {
 
                 {/* Chat area */}
                 <div className="cp-chat-area">
-                    {isMessagesLoading && activeThread ? (
+                    {activeThread && isMessagesLoading ? (
                         <div className="cp-chat-loading" role="status" aria-live="polite">
                             <div className="cp-chat-loading-spinner" />
                             <span>Loading thread…</span>
                         </div>
-                    ) : messages.length === 0 && !isTyping ? (
+                    ) : !activeThread && messages.length === 0 && !isTyping ? (
                         <div className="cp-empty">
                             {/* Build icon */}
                             <div className="cp-empty-icon" style={{ fontSize: '44px', fontWeight: 700, lineHeight: 1, letterSpacing: '-0.02em', userSelect: 'none' }}>
@@ -3049,6 +4021,11 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                     </button>
                                 ))}
                             </div>
+                        </div>
+                    ) : activeThread && messages.length === 0 && !isTyping ? (
+                        <div className="cp-chat-loading" role="status" aria-live="polite">
+                            <div className="cp-chat-loading-spinner" />
+                            <span>Opening thread…</span>
                         </div>
                     ) : (
                         <div className="cp-messages">
@@ -3076,178 +4053,209 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                     }
 
                                     return (
-                                    <motion.div key={msg.id ?? i} className={`cp-msg ${msg.type}`} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }}>
-                                        {msg.type === 'user' ? (
-                                            <div className="cp-user-msg">
-                                                {msg.files?.length > 0 && (
-                                                    <div className="cp-attached-files">
-                                                        {msg.files.map(f => (
-                                                            <div key={f} className="cp-file-chip">
-                                                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
-                                                                {f}
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                )}
-                                                {msg.text && <div className="cp-bubble">{msg.text}</div>}
-                                            </div>
-                                        ) : msg.type === 'assistant' ? (
-                                            <div className="cp-agent-wrap">
-                                                <div className="cp-agent-avatar">
-                                                    <span className="cp-agent-mini-mark" aria-hidden="true">
-                                                        <span className="cp-agent-mini-i">I</span><span className="cp-agent-mini-dot">.</span>
-                                                    </span>
-                                                </div>
-                                                {msg.text && <ChatMessageMarkdown className="cp-bubble cp-assistant-bubble cp-chat-markdown" text={msg.text} />}
-                                            </div>
-                                        ) : (
-                                            <div className="cp-agent-wrap">
-                                                <div className="cp-agent-avatar">
-                                                    <span className="cp-agent-mini-mark" aria-hidden="true">
-                                                        <span className="cp-agent-mini-i">I</span><span className="cp-agent-mini-dot">.</span>
-                                                    </span>
-                                                </div>
-                                                <div className="cp-agent-body">
-                                                    {agentPrefaceText && (
-                                                        <div className="cp-agent-preface">
-                                                            {agentPrefaceText}
+                                        <motion.div key={msg.id ?? i} className={`cp-msg ${msg.type}`} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.22 }}>
+                                            {msg.type === 'user' ? (
+                                                <div className="cp-user-msg">
+                                                    {msg.files?.length > 0 && (
+                                                        <div className="cp-attached-files">
+                                                            {msg.files.map(f => (
+                                                                <div key={f} className="cp-file-chip">
+                                                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                                                                    {f}
+                                                                </div>
+                                                            ))}
                                                         </div>
                                                     )}
-                                                    {/* Thought Process Tree */}
-                                                    {!msg.hideThoughtProcess && <div className="cp-thought-process">
-                                                        <details
-                                                            className="cp-thought-details"
-                                                            open={msg.isStreaming || msg.status === 'awaiting_approval'}
-                                                        >
-                                                            <summary className="cp-thought-summary">
-                                                                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21" /></svg>
-                                                                <span
-                                                                    className={`cp-run-dot-inline ${msg.runMode === 'real' ? 'real' : 'mock'}`}
-                                                                    role="img"
-                                                                    aria-label={msg.runMode === 'real' ? 'Real Run' : 'Mock Run'}
-                                                                    title={msg.runMode === 'real' ? 'Live backend pipeline stream' : 'Mock pipeline simulation'}
-                                                                />
-                                                                View thought process
-                                                            </summary>
-                                                            <div className="cp-thought-tree">
-
-                                                                {/* Render Phase 1 */}
-                                                                {(msg.phase >= 1) && AGENT_PHASE_1.map((step, idx) => {
-                                                                    const isPast = msg.phase > 1 || (msg.phase === 1 && msg.stepIndex > idx) || msg.status === 'completed';
-                                                                    const isCurrent = msg.phase === 1 && msg.stepIndex === idx && msg.isStreaming;
-                                                                    if (!isPast && !isCurrent) return null;
-
-                                                                    return (
-                                                                        <div key={step.id} className={`cp-tree-node ${isCurrent ? 'running' : 'done'}`}>
-                                                                            <div className="cp-tree-main">
-                                                                                {isCurrent ? (
-                                                                                    <button type="button" className="cp-run-stop-btn" title="Stop pipeline" aria-label="Stop pipeline" onClick={handleStopPipeline}>
-                                                                                        <span className="cp-run-spinner" />
-                                                                                    </button>
-                                                                                ) : (
-                                                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
-                                                                                )}
-                                                                                <span>{isCurrent ? step.text : step.doneText}</span>
-                                                                                {(() => {
-                                                                                    const duration = getStageDuration(msg, step.id === 'req' ? 'requirements' : 'architecture');
-                                                                                    return duration ? <span className="cp-stage-time">{duration}</span> : null;
-                                                                                })()}
-                                                                            </div>
-                                                                            {isPast && step.sub && (
-                                                                                <div className="cp-tree-sub">
-                                                                                    {step.sub.map((s, sIdx) => (
-                                                                                        <div key={sIdx} className="cp-tree-sub-item">
-                                                                                            <span className="cp-tree-elbow">└─</span>
-                                                                                            {autoApprove ? <span className="cp-sub-auto">Autoapproved</span> : <span className="cp-sub-auto">—</span>}
-                                                                                            {!s.action ? (
-                                                                                                <span className="cp-tree-sub-label">{s.label}</span>
-                                                                                            ) : s.action?.startsWith?.('file:') ? (
-                                                                                                <button onClick={() => openFilePreviewer(s.action.split(':')[1])} className="cp-tree-link">
-                                                                                                    {s.label} <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 17l9.2-9.2M17 17V7H7" /></svg>
-                                                                                                </button>
-                                                                                            ) : (
-                                                                                                <a href={s.action.split(':')[1]} target="_blank" rel="noreferrer" className="cp-tree-link">
-                                                                                                    {s.label} <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 17l9.2-9.2M17 17V7H7" /></svg>
-                                                                                                </a>
-                                                                                            )}
-                                                                                        </div>
-                                                                                    ))}
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
-                                                                    );
-                                                                })}
-
-                                                                {/* Render Phase 2 */}
-                                                                {(msg.phase >= 2) && AGENT_PHASE_2.map((step, idx) => {
-                                                                    const isPast = msg.phase > 2 || (msg.phase === 2 && msg.stepIndex > idx) || msg.status === 'completed';
-                                                                    const isCurrent = msg.phase === 2 && msg.stepIndex === idx && msg.isStreaming;
-                                                                    if (!isPast && !isCurrent) return null;
-
-                                                                    return (
-                                                                        <div key={step.id} className={`cp-tree-node ${isCurrent ? 'running' : 'done'}`}>
-                                                                            <div className="cp-tree-main">
-                                                                                {isCurrent ? (
-                                                                                    <button type="button" className="cp-run-stop-btn" title="Stop pipeline" aria-label="Stop pipeline" onClick={handleStopPipeline}>
-                                                                                        <span className="cp-run-spinner" />
-                                                                                    </button>
-                                                                                ) : (
-                                                                                    step.icon === 'deploy' ?
-                                                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
-                                                                                        : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
-                                                                                )}
-                                                                                <span>{isCurrent ? step.text : step.doneText}</span>
-                                                                                {(() => {
-                                                                                    const duration = getStageDuration(msg, step.id === 'code' ? 'implementer' : 'reviewer');
-                                                                                    return duration ? <span className="cp-stage-time">{duration}</span> : null;
-                                                                                })()}
-                                                                            </div>
-                                                                            {isPast && step.sub && (
-                                                                                <div className="cp-tree-sub">
-                                                                                    {step.sub.map((s, sIdx) => (
-                                                                                        <div key={sIdx} className="cp-tree-sub-item">
-                                                                                            <span className="cp-tree-elbow">└─</span>
-                                                                                            {autoApprove ? <span className="cp-sub-auto">Autoapproved</span> : <span className="cp-sub-auto">—</span>}
-                                                                                            {!s.action ? (
-                                                                                                <span className="cp-tree-sub-label">{s.label}</span>
-                                                                                            ) : s.action?.startsWith?.('file:') ? (
-                                                                                                <button onClick={() => openFilePreviewer(s.action.split(':')[1])} className="cp-tree-link">
-                                                                                                    {s.label}
-                                                                                                </button>
-                                                                                            ) : (
-                                                                                                <a href={s.action.split(':')[1]} target="_blank" rel="noreferrer" className="cp-tree-link">
-                                                                                                    {s.label} <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 17l9.2-9.2M17 17V7H7" /></svg>
-                                                                                                </a>
-                                                                                            )}
-                                                                                        </div>
-                                                                                    ))}
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
-                                                                    );
-                                                                })}
+                                                    {msg.text && <div className="cp-bubble">{msg.text}</div>}
+                                                </div>
+                                            ) : msg.type === 'assistant' ? (
+                                                <div className="cp-agent-wrap">
+                                                    <div className="cp-agent-avatar">
+                                                        <span className="cp-agent-mini-mark" aria-hidden="true">
+                                                            <span className="cp-agent-mini-i">I</span><span className="cp-agent-mini-dot">.</span>
+                                                        </span>
+                                                    </div>
+                                                    {msg.text && <ChatMessageMarkdown className="cp-bubble cp-assistant-bubble cp-chat-markdown" text={msg.text} />}
+                                                </div>
+                                            ) : (
+                                                <div className="cp-agent-wrap">
+                                                    <div className="cp-agent-avatar">
+                                                        <span className="cp-agent-mini-mark" aria-hidden="true">
+                                                            <span className="cp-agent-mini-i">I</span><span className="cp-agent-mini-dot">.</span>
+                                                        </span>
+                                                    </div>
+                                                    <div className="cp-agent-body">
+                                                        {agentPrefaceText && (
+                                                            <div className="cp-agent-preface">
+                                                                {agentPrefaceText}
                                                             </div>
-                                                            {Array.isArray(msg.reviewUpdates) && msg.reviewUpdates.length > 0 && (
-                                                                <div className="cp-review-stream">
-                                                                    {msg.reviewUpdates.map((note) => (
-                                                                        <div key={note.id || note.text} className={`cp-review-stream-item ${note.kind || 'info'}`}>
-                                                                            <span className="cp-review-stream-dot" />
-                                                                            <span>{note.text}</span>
-                                                                        </div>
-                                                                    ))}
-                                                                </div>
-                                                            )}
-                                                        </details>
-                                                    </div>}
+                                                        )}
+                                                        {/* Thought Process Tree */}
+                                                        {!msg.hideThoughtProcess && <div className="cp-thought-process">
+                                                            <details
+                                                                className="cp-thought-details"
+                                                                open={msg.isStreaming || msg.status === 'awaiting_approval'}
+                                                            >
+                                                                <summary className="cp-thought-summary">
+                                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21" /></svg>
+                                                                    <span
+                                                                        className={`cp-run-dot-inline ${msg.runMode === 'real' ? 'real' : 'mock'}`}
+                                                                        role="img"
+                                                                        aria-label={msg.runMode === 'real' ? 'Real Run' : 'Mock Run'}
+                                                                        title={msg.runMode === 'real' ? 'Live backend pipeline stream' : 'Mock pipeline simulation'}
+                                                                    />
+                                                                    View thought process
+                                                                </summary>
+                                                                <div className="cp-thought-tree">
 
-                                                    {/* Human in the loop halt block */}
-                                                    {msg.status === 'awaiting_approval' && (
-                                                        <div className="cp-review-block">
-                                                            <div className="cp-review-content">
-                                                                <p>I have generated the Initial Requirements and Architecture. Please review them.</p>
+                                                                    {/* Render Phase 1 */}
+                                                                    {(msg.phase >= 1) && AGENT_PHASE_1.map((step, idx) => {
+                                                                        const isPast = msg.phase > 1 || (msg.phase === 1 && msg.stepIndex > idx) || msg.status === 'completed';
+                                                                        const isCurrent = msg.phase === 1 && msg.stepIndex === idx && msg.isStreaming;
+                                                                        if (!isPast && !isCurrent) return null;
+
+                                                                        return (
+                                                                            <div key={step.id} className={`cp-tree-node ${isCurrent ? 'running' : 'done'}`}>
+                                                                                <div className="cp-tree-main">
+                                                                                    {isCurrent ? (
+                                                                                        <button type="button" className="cp-run-stop-btn" title="Stop pipeline" aria-label="Stop pipeline" onClick={handleStopPipeline}>
+                                                                                            <span className="cp-run-spinner" />
+                                                                                        </button>
+                                                                                    ) : (
+                                                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                                                                                    )}
+                                                                                    <span>{isCurrent ? step.text : step.doneText}</span>
+                                                                                    {(() => {
+                                                                                        const duration = getStageDuration(msg, step.id === 'req' ? 'requirements' : 'architecture');
+                                                                                        return duration ? <span className="cp-stage-time">{duration}</span> : null;
+                                                                                    })()}
+                                                                                </div>
+                                                                                {isPast && step.sub && (
+                                                                                    <div className="cp-tree-sub">
+                                                                                        {step.sub.map((s, sIdx) => (
+                                                                                            <div key={sIdx} className="cp-tree-sub-item">
+                                                                                                <span className="cp-tree-elbow">└─</span>
+                                                                                                {autoApprove ? <span className="cp-sub-auto">Autoapproved</span> : <span className="cp-sub-auto">—</span>}
+                                                                                                {!s.action ? (
+                                                                                                    <span className="cp-tree-sub-label">{s.label}</span>
+                                                                                                ) : s.action?.startsWith?.('file:') ? (
+                                                                                                    <button onClick={() => openFilePreviewer(s.action.split(':')[1])} className="cp-tree-link">
+                                                                                                        {s.label} <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 17l9.2-9.2M17 17V7H7" /></svg>
+                                                                                                    </button>
+                                                                                                ) : (
+                                                                                                    <a href={s.action.split(':')[1]} target="_blank" rel="noreferrer" className="cp-tree-link">
+                                                                                                        {s.label} <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 17l9.2-9.2M17 17V7H7" /></svg>
+                                                                                                    </a>
+                                                                                                )}
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        );
+                                                                    })}
+
+                                                                    {/* Render Phase 2 */}
+                                                                    {(msg.phase >= 2) && AGENT_PHASE_2.map((step, idx) => {
+                                                                        const isPast = msg.phase > 2 || (msg.phase === 2 && msg.stepIndex > idx) || msg.status === 'completed';
+                                                                        const isCurrent = msg.phase === 2 && msg.stepIndex === idx && msg.isStreaming;
+                                                                        if (!isPast && !isCurrent) return null;
+
+                                                                        return (
+                                                                            <div key={step.id} className={`cp-tree-node ${isCurrent ? 'running' : 'done'}`}>
+                                                                                <div className="cp-tree-main">
+                                                                                    {isCurrent ? (
+                                                                                        <button type="button" className="cp-run-stop-btn" title="Stop pipeline" aria-label="Stop pipeline" onClick={handleStopPipeline}>
+                                                                                            <span className="cp-run-spinner" />
+                                                                                        </button>
+                                                                                    ) : (
+                                                                                        step.icon === 'deploy' ?
+                                                                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                                                                                            : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                                                                                    )}
+                                                                                    <span>{isCurrent ? step.text : step.doneText}</span>
+                                                                                    {(() => {
+                                                                                        const duration = getStageDuration(msg, step.id === 'code' ? 'implementer' : 'reviewer');
+                                                                                        return duration ? <span className="cp-stage-time">{duration}</span> : null;
+                                                                                    })()}
+                                                                                </div>
+                                                                                {isPast && step.sub && (
+                                                                                    <div className="cp-tree-sub">
+                                                                                        {step.sub.map((s, sIdx) => (
+                                                                                            <div key={sIdx} className="cp-tree-sub-item">
+                                                                                                <span className="cp-tree-elbow">└─</span>
+                                                                                                {autoApprove ? <span className="cp-sub-auto">Autoapproved</span> : <span className="cp-sub-auto">—</span>}
+                                                                                                {!s.action ? (
+                                                                                                    <span className="cp-tree-sub-label">{s.label}</span>
+                                                                                                ) : s.action?.startsWith?.('file:') ? (
+                                                                                                    <button onClick={() => openFilePreviewer(s.action.split(':')[1])} className="cp-tree-link">
+                                                                                                        {s.label}
+                                                                                                    </button>
+                                                                                                ) : (
+                                                                                                    <a href={s.action.split(':')[1]} target="_blank" rel="noreferrer" className="cp-tree-link">
+                                                                                                        {s.label} <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M7 17l9.2-9.2M17 17V7H7" /></svg>
+                                                                                                    </a>
+                                                                                                )}
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                                {Array.isArray(msg.reviewUpdates) && msg.reviewUpdates.length > 0 && (
+                                                                    <div className="cp-review-stream">
+                                                                        {msg.reviewUpdates.map((note) => (
+                                                                            <div key={note.id || note.text} className={`cp-review-stream-item ${note.kind || 'info'}`}>
+                                                                                <span className="cp-review-stream-dot" />
+                                                                                <span>{note.text}</span>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+                                                            </details>
+                                                        </div>}
+
+                                                        {/* Human in the loop halt block */}
+                                                        {msg.status === 'awaiting_approval' && (
+                                                            <div className="cp-review-block">
+                                                                <div className="cp-review-content">
+                                                                    <p>I have generated the Initial Requirements and Architecture. Please review them.</p>
+                                                                    {nonCodeArtifacts.length > 0 && (
+                                                                        <div className="cp-agent-artifact-section">
+                                                                            <div className="cp-agent-artifact-label">Artifacts to Review</div>
+                                                                            <div className="cp-agent-files-group">
+                                                                                {nonCodeArtifacts.map(f => (
+                                                                                    <button key={f} className="cp-file-pill" onClick={() => openFilePreviewer(f)}>
+                                                                                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                                                                                        {f}
+                                                                                    </button>
+                                                                                ))}
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                                <div className="cp-review-actions">
+                                                                    <button className="cp-action-btn cp-action-approve" onClick={() => approvePhase1(msg.id)}>
+                                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="20 6 9 17 4 12" /></svg>
+                                                                        Approve to Continue
+                                                                    </button>
+                                                                    <button className="cp-action-btn cp-action-suggest" onClick={() => { setPreviewFile('Requirements Document.md'); setPanelMode('file'); setSuggestOpen(true); }}>
+                                                                        Suggest Edits
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        {/* Final output block */}
+                                                        {(msg.status === 'completed' || msg.status === 'error') && msg.text && (
+                                                            <div className="cp-final-output">
+                                                                {!suppressAgentSummaryText && <ChatMessageMarkdown className="cp-agent-text cp-chat-markdown" text={msg.text} />}
+
                                                                 {nonCodeArtifacts.length > 0 && (
                                                                     <div className="cp-agent-artifact-section">
-                                                                        <div className="cp-agent-artifact-label">Artifacts to Review</div>
+                                                                        <div className="cp-agent-artifact-label">Artifacts</div>
                                                                         <div className="cp-agent-files-group">
                                                                             {nonCodeArtifacts.map(f => (
                                                                                 <button key={f} className="cp-file-pill" onClick={() => openFilePreviewer(f)}>
@@ -3258,116 +4266,88 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                                                         </div>
                                                                     </div>
                                                                 )}
-                                                            </div>
-                                                            <div className="cp-review-actions">
-                                                                <button className="cp-action-btn cp-action-approve" onClick={() => approvePhase1(msg.id)}>
-                                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="20 6 9 17 4 12" /></svg>
-                                                                    Approve to Continue
-                                                                </button>
-                                                                <button className="cp-action-btn cp-action-suggest" onClick={() => { setPreviewFile('Requirements Document.md'); setPanelMode('file'); setSuggestOpen(true); }}>
-                                                                    Suggest Edits
-                                                                </button>
-                                                            </div>
-                                                        </div>
-                                                    )}
 
-                                                    {/* Final output block */}
-                                                    {msg.status === 'completed' && msg.text && (
-                                                        <div className="cp-final-output">
-                                                            {!suppressAgentSummaryText && <ChatMessageMarkdown className="cp-agent-text cp-chat-markdown" text={msg.text} />}
+                                                                {codeArtifactFiles.length > 0 && (
+                                                                    <div className="cp-agent-artifact-section">
+                                                                        <div className="cp-agent-artifact-label">Code Files</div>
+                                                                        <div className="cp-agent-files-group">
+                                                                            {codeArtifactFiles.map(f => (
+                                                                                <button key={f} className="cp-file-pill code-chip" onClick={() => openFilePreviewer(f)}>
+                                                                                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                                                                                    {f}
+                                                                                </button>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
 
-                                                            {nonCodeArtifacts.length > 0 && (
-                                                                <div className="cp-agent-artifact-section">
-                                                                    <div className="cp-agent-artifact-label">Artifacts</div>
-                                                                    <div className="cp-agent-files-group">
-                                                                        {nonCodeArtifacts.map(f => (
-                                                                            <button key={f} className="cp-file-pill" onClick={() => openFilePreviewer(f)}>
-                                                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
-                                                                                {f}
+                                                                {(msg.status === 'completed' || msg.status === 'error') && msg.phase >= 2 && codeArtifactFiles.length > 0 && (
+                                                                    <>
+                                                                        <div className="cp-export-block">
+                                                                            <div className="cp-deploy-content">
+                                                                                Download the generated backend files so you can drop the <code>backend/</code> folder into your project.
+                                                                            </div>
+                                                                            <button
+                                                                                className="cp-action-btn cp-action-download"
+                                                                                onClick={() => exportBackendBundle(
+                                                                                    (msg.runMode === 'real' && Object.keys(msg.generatedFileMap || {}).length)
+                                                                                        ? msg.generatedFileMap
+                                                                                        : MOCK_FILES
+                                                                                )}
+                                                                            >
+                                                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                                                                    <polyline points="7 10 12 15 17 10" />
+                                                                                    <line x1="12" y1="15" x2="12" y2="3" />
+                                                                                </svg>
+                                                                                Download Backend Files
                                                                             </button>
-                                                                        ))}
-                                                                    </div>
-                                                                </div>
-                                                            )}
+                                                                        </div>
+                                                                        {msg.status === 'completed' && (
+                                                                            <div className="cp-standalone-action">
+                                                                                <button
+                                                                                    className="cp-action-btn cp-action-tester"
+                                                                                    onClick={() => openTesterPanelForThread(activeThread)}
+                                                                                >
+                                                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
+                                                                                    Test API Endpoints
+                                                                                </button>
+                                                                            </div>
+                                                                        )}
+                                                                    </>
+                                                                )}
 
-                                                            {codeArtifactFiles.length > 0 && (
-                                                                <div className="cp-agent-artifact-section">
-                                                                    <div className="cp-agent-artifact-label">Code Files</div>
-                                                                    <div className="cp-agent-files-group">
-                                                                        {codeArtifactFiles.map(f => (
-                                                                            <button key={f} className="cp-file-pill code-chip" onClick={() => openFilePreviewer(f)}>
-                                                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
-                                                                                {f}
+                                                                {/* Always show deployment blocks for completed pipeline phases, regardless of explicit payload flags */}
+                                                                {msg.status === 'completed' && msg.phase >= 2 && msg.runMode !== 'real' && (
+                                                                    <div className="cp-deployment-blocks">
+                                                                        <div className="cp-deploy-block">
+                                                                            <div className="cp-deploy-content">
+                                                                                Use the interactive API playground to test your generated endpoints.
+                                                                            </div>
+                                                                            <button className="cp-action-btn cp-action-tester" onClick={() => openTesterPanelForThread(activeThread)}>
+                                                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
+                                                                                Test API Endpoints
                                                                             </button>
-                                                                        ))}
-                                                                    </div>
-                                                                </div>
-                                                            )}
-
-                                                            {msg.status === 'completed' && msg.phase >= 2 && codeArtifactFiles.length > 0 && (
-                                                                <>
-                                                                    <div className="cp-export-block">
-                                                                        <div className="cp-deploy-content">
-                                                                            Download the generated backend files so you can drop the <code>backend/</code> folder into your project.
                                                                         </div>
-                                                                        <button
-                                                                            className="cp-action-btn cp-action-download"
-                                                                            onClick={() => exportBackendBundle(
-                                                                                (msg.runMode === 'real' && Object.keys(msg.generatedFileMap || {}).length)
-                                                                                    ? msg.generatedFileMap
-                                                                                    : MOCK_FILES
-                                                                            )}
-                                                                        >
-                                                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                                                                <polyline points="7 10 12 15 17 10" />
-                                                                                <line x1="12" y1="15" x2="12" y2="3" />
-                                                                            </svg>
-                                                                            Download Backend Files
-                                                                        </button>
-                                                                    </div>
-                                                                    <div className="cp-standalone-action">
-                                                                        <button
-                                                                            className="cp-action-btn cp-action-tester"
-                                                                            onClick={openTesterPanel}
-                                                                        >
-                                                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
-                                                                            Test API Endpoints
-                                                                        </button>
-                                                                    </div>
-                                                                </>
-                                                            )}
-
-                                                            {/* Always show deployment blocks for completed pipeline phases, regardless of explicit payload flags */}
-                                                            {msg.status === 'completed' && msg.phase >= 2 && msg.runMode !== 'real' && (
-                                                                <div className="cp-deployment-blocks">
-                                                                    <div className="cp-deploy-block">
-                                                                        <div className="cp-deploy-content">
-                                                                            Use the interactive API playground to test your generated endpoints.
+                                                                        <div className="cp-deploy-block">
+                                                                            <div className="cp-deploy-content">
+                                                                                Your backend has been packaged and containerized via <a href="https://hub.docker.com/" target="_blank" className="cp-tree-link">dockerhub ↗</a> and deployed to production.
+                                                                            </div>
+                                                                            <a className="cp-action-btn cp-action-live" href="https://app.interius.dev" target="_blank" rel="noopener noreferrer">
+                                                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" /></svg>
+                                                                                View Live API
+                                                                            </a>
                                                                         </div>
-                                                                        <button className="cp-action-btn cp-action-tester" onClick={openTesterPanel}>
-                                                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
-                                                                            Test API Endpoints
-                                                                        </button>
                                                                     </div>
-                                                                    <div className="cp-deploy-block">
-                                                                        <div className="cp-deploy-content">
-                                                                            Your backend has been packaged and containerized via <a href="https://hub.docker.com/" target="_blank" className="cp-tree-link">dockerhub ↗</a> and deployed to production.
-                                                                        </div>
-                                                                        <a className="cp-action-btn cp-action-live" href="https://app.interius.dev" target="_blank" rel="noopener noreferrer">
-                                                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" /></svg>
-                                                                            View Live API
-                                                                        </a>
-                                                                    </div>
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    )}
+                                                                )}
+                                                            </div>
+                                                        )}
+                                                    </div>
                                                 </div>
-                                            </div>
-                                        )}
-                                    </motion.div>
-                                );})}
+                                            )}
+                                        </motion.div>
+                                    );
+                                })}
 
 
                             </AnimatePresence>
@@ -3549,19 +4529,31 @@ export default function ChatPage({ theme, onThemeToggle }) {
                     <motion.aside
                         className="cp-right-panel"
                         initial={{ width: 0, opacity: 0 }}
-                        animate={{ width: panelMode === 'file' ? 660 : 440, opacity: 1 }}
+                        animate={{ width: currentPanelWidth, opacity: 1 }}
                         exit={{ width: 0, opacity: 0 }}
                         transition={{ duration: 0.26, ease: [0.4, 0, 0.2, 1] }}
                     >
+                        <button
+                            type="button"
+                            className="cp-rp-resizer"
+                            onPointerDown={beginPanelResize}
+                            aria-label="Resize right panel"
+                        >
+                            <span className="cp-rp-resizer-line" />
+                        </button>
                         <div className="cp-rp-inner">
                             <div className="cp-rp-header">
                                 <div className="cp-rp-title-wrap">
                                     {panelMode === 'file' ? (
                                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                                    ) : panelMode === 'sandbox' ? (
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" /></svg>
                                     ) : (
                                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" /></svg>
                                     )}
-                                    <span className="cp-rp-title">{panelMode === 'file' ? previewFile : 'API Tester'}</span>
+                                    <span className="cp-rp-title">
+                                        {panelMode === 'file' ? previewFile : panelMode === 'sandbox' ? 'Live API Sandbox' : 'API Tester'}
+                                    </span>
                                 </div>
                                 <button className="cp-rp-close" onClick={() => { setPanelMode(null); setPreviewFile(null); }}>
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -3573,22 +4565,112 @@ export default function ChatPage({ theme, onThemeToggle }) {
                             {panelMode === 'tester' && (
                                 <>
                                     <div className="cp-rp-swagger">
-                                        <a
-                                            href="https://app.interius.dev/docs"
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="cp-swagger-btn"
-                                        >
-                                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10" /><path d="M12 8v4l3 3" /></svg>
-                                            Open Swagger UI
-                                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
-                                        </a>
+                                        {activeSandboxSwaggerUrl ? (
+                                            <a
+                                                href={activeSandboxSwaggerUrl}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="cp-swagger-btn"
+                                            >
+                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10" /><path d="M12 8v4l3 3" /></svg>
+                                                Open Swagger UI
+                                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
+                                            </a>
+                                        ) : (
+                                            <button
+                                                className="cp-swagger-btn"
+                                                onClick={() => activeThread && openTesterPanelForThread(activeThread)}
+                                                disabled={!activeThread || (sandboxStatus === 'deploying' && sandboxThreadId === activeThread)}
+                                            >
+                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10" /><path d="M12 8v4l3 3" /></svg>
+                                                {sandboxStatus === 'deploying' && sandboxThreadId === activeThread ? 'Starting Live Sandbox...' : 'Starting Live Sandbox'}
+                                            </button>
+                                        )}
                                     </div>
-                                    <p className="cp-rp-desc">Try your endpoints live or use the built-in tester cards while runtime wiring is being refined.</p>
+                                    <p className="cp-rp-desc">
+                                        {sandboxStatus === 'deploying' && sandboxThreadId === activeThread
+                                            ? 'Spinning up the live sandbox container for this thread. The Swagger UI button will appear here when startup completes.'
+                                            : sandboxError
+                                                ? `Sandbox launch failed: ${sandboxError}`
+                                                : activeSandboxSwaggerUrl
+                                                    ? 'The tester below is now driven by the generated API schema from the live sandbox.'
+                                                    : 'Opening the tester starts the live sandbox for this thread automatically.'}
+                                    </p>
+                                    {sandboxSpecError && <div className="ep-error">{sandboxSpecError}</div>}
+                                    {sandboxSpecStatus === 'loading' && (
+                                        <div className="cp-rp-desc">Loading endpoint definitions from the live sandbox...</div>
+                                    )}
                                     <div className="cp-rp-endpoints">
-                                        {ENDPOINTS.map(ep => <EndpointCard key={ep.id} ep={ep} />)}
+                                        {sandboxEndpoints.length > 0 ? sandboxEndpoints.map((ep) => (
+                                            <EndpointCard
+                                                key={ep.id}
+                                                ep={ep}
+                                                threadId={activeThread}
+                                                sandboxReady={Boolean(activeSandboxSwaggerUrl)}
+                                                onRequireSandbox={() => activeThread && deploySandboxForThread(activeThread)}
+                                            />
+                                        )) : (
+                                            sandboxSpecStatus !== 'loading' && (
+                                                <div className="ep-friendly-empty">
+                                                    {activeSandboxSwaggerUrl
+                                                        ? 'No testable endpoints were found in the sandbox OpenAPI spec.'
+                                                        : 'No live sandbox schema is loaded for this thread yet.'}
+                                                </div>
+                                            )
+                                        )}
                                     </div>
                                 </>
+                            )}
+
+                            {panelMode === 'sandbox' && (
+                                <div className="cp-rp-sandbox">
+                                    <div className="cp-rp-swagger">
+                                        {activeSandboxSwaggerUrl ? (
+                                            <a
+                                                href={activeSandboxSwaggerUrl}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="cp-swagger-btn"
+                                            >
+                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10" /><path d="M12 8v4l3 3" /></svg>
+                                                Open in new tab
+                                            </a>
+                                        ) : (
+                                            <button
+                                                className="cp-swagger-btn"
+                                                onClick={() => activeThread && deploySandboxForThread(activeThread)}
+                                                disabled={!activeThread || sandboxStatus === 'deploying'}
+                                            >
+                                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10" /><path d="M12 8v4l3 3" /></svg>
+                                                {sandboxStatus === 'deploying' ? 'Starting Sandbox...' : 'Start Live Sandbox'}
+                                            </button>
+                                        )}
+                                    </div>
+                                    <div className="cp-rp-sandbox-body">
+                                        {activeSandboxSwaggerUrl ? (
+                                            <iframe className="cp-rp-sandbox-frame" src={activeSandboxSwaggerUrl} title="Live API Sandbox" />
+                                        ) : (
+                                            <div className="cp-rp-sandbox-empty">
+                                                <div className="cp-rp-sandbox-empty-title">
+                                                    {sandboxStatus === 'deploying'
+                                                        ? 'Starting live sandbox...'
+                                                        : sandboxError || 'The sandbox has not been started for this thread yet.'}
+                                                </div>
+                                                {sandboxStatus === 'deploying' && (
+                                                    <p className="cp-rp-sandbox-empty-copy">
+                                                        Docker is running and the generated API is being prepared. This can take a bit while dependencies install.
+                                                    </p>
+                                                )}
+                                                {sandboxStatus === 'error' && sandboxLogs && (
+                                                    <details className="cp-rp-sandbox-log-wrap" open>
+                                                        <summary>View startup log</summary>
+                                                        <pre className="cp-rp-sandbox-log">{sandboxLogs}</pre>
+                                                    </details>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
                             )}
 
                             {panelMode === 'file' && previewFile && (
@@ -3610,18 +4692,22 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                     </div>
                                     {isSchemaVisualizerPreview(previewFile) ? (
                                         <div className="cp-ide-scroll">
-                                            <SchemaVisualizer content={getPreviewFileContent(previewFile)} />
+                                            <ZoomablePreview resetKey={previewFile}>
+                                                <SchemaVisualizer content={getPreviewFileContent(previewFile)} />
+                                            </ZoomablePreview>
                                         </div>
                                     ) : previewFile?.toLowerCase?.().endsWith('.mmd') ? (
                                         <div className="cp-ide-scroll">
-                                            <MermaidPreview code={getPreviewFileContent(previewFile)} theme={theme} />
+                                            <ZoomablePreview resetKey={`${previewFile}:${theme}`}>
+                                                <MermaidPreview code={getPreviewFileContent(previewFile)} theme={theme} />
+                                            </ZoomablePreview>
                                         </div>
                                     ) : isMarkdownPreview(previewFile) ? (
                                         <div className="cp-ide-scroll">
                                             <div className="cp-preview-markdown">
                                                 <ReactMarkdown
                                                     remarkPlugins={[remarkGfm]}
-                                                components={{
+                                                    components={{
                                                         code({ inline, children, ...props }) {
                                                             if (inline) {
                                                                 return (
@@ -3680,27 +4766,27 @@ export default function ChatPage({ theme, onThemeToggle }) {
                                             </div>
                                         </div>
                                     ) : (
-                                    <div className="cp-ide-scroll">
-                                        <table className="cp-ide-table">
-                                            <tbody>
-                                                {getPreviewFileContent(previewFile).split('\n').map((line, i) => (
-                                                    <tr key={i} className="cp-ide-row">
-                                                        <td className="cp-ide-ln">{i + 1}</td>
-                                                        <td
-                                                            className="cp-ide-line"
-                                                            dangerouslySetInnerHTML={{
-                                                                __html: (
-                                                                    shouldSyntaxHighlightFile(previewFile)
-                                                                        ? (syntaxHighlight(line) || '&nbsp;')
-                                                                        : (escapeHtml(line) || '&nbsp;')
-                                                                )
-                                                            }}
-                                                        />
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
+                                        <div className="cp-ide-scroll">
+                                            <table className="cp-ide-table">
+                                                <tbody>
+                                                    {getPreviewFileContent(previewFile).split('\n').map((line, i) => (
+                                                        <tr key={i} className="cp-ide-row">
+                                                            <td className="cp-ide-ln">{i + 1}</td>
+                                                            <td
+                                                                className="cp-ide-line"
+                                                                dangerouslySetInnerHTML={{
+                                                                    __html: (
+                                                                        shouldSyntaxHighlightFile(previewFile)
+                                                                            ? (syntaxHighlight(line) || '&nbsp;')
+                                                                            : (escapeHtml(line) || '&nbsp;')
+                                                                    )
+                                                                }}
+                                                            />
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
                                     )}
                                     {canSuggestEditsInPreview && (
                                         <div className="cp-suggest-footer">

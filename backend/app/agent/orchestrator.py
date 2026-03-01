@@ -6,8 +6,9 @@ from sqlmodel import Session
 
 from app.agent.architecture_agent import ArchitectureAgent
 from app.agent.artifact_store import store_code_bundle
-from app.agent.artifacts import GeneratedCode, ProjectCharter, SystemArchitecture
+from app.agent.artifacts import GeneratedCode, ProjectCharter, RepairContext, ReviewReport, SystemArchitecture
 from app.agent.implementer_agent import ImplementerAgent
+from app.agent.repair_agent import RepairAgent
 from app.agent.requirements_agent import RequirementsAgent
 from app.agent.reviewer_agent import ReviewerAgent
 from app.crud import create_artifact_record, update_generation_run_status
@@ -85,6 +86,7 @@ async def run_pipeline_generator(
     run_id: uuid.UUID,
     prompt: str,
     *,
+    runtime_mode: str = "sandbox",
     start_stage: str = "requirements",
     charter_override: ProjectCharter | None = None,
     architecture_override: SystemArchitecture | None = None,
@@ -176,7 +178,7 @@ async def run_pipeline_generator(
         })
 
         # 5. Review Loop (Perceive-Plan-Act cycle)
-        MAX_REVIEW_ITERATIONS = 5
+        MAX_REVIEW_ITERATIONS = 3
         REVIEW_TRUST_SCORE_THRESHOLD = 7  # Reuse reviewer security_score as the current trust threshold.
         rev_agent = ReviewerAgent()
         review_artifact_for_completion: dict = {
@@ -193,7 +195,7 @@ async def run_pipeline_generator(
             for attempt in range(1, MAX_REVIEW_ITERATIONS + 1):
                 yield json.dumps({
                     "status": "reviewer",
-                    "message": f"Review pass {attempt}/{MAX_REVIEW_ITERATIONS} - checking code quality and security..."
+                    "message": "Reviewing generated code..."
                 })
 
                 review = await rev_agent.run(code)
@@ -215,6 +217,21 @@ async def run_pipeline_generator(
                     )
                 )
 
+                yield json.dumps({
+                    "status": "review_pass",
+                    "message": (
+                        "Review pass accepted."
+                        if bool(review.approved)
+                        else "Review pass found blocking issues."
+                    ),
+                    "attempt": attempt,
+                    "issues_count": len(review.issues or []),
+                    "affected_files": list(review.affected_files or []),
+                    "security_score": review.security_score,
+                    "approved": bool(review.approved),
+                    "meets_trust_threshold": (review.security_score or 0) >= REVIEW_TRUST_SCORE_THRESHOLD,
+                })
+
                 meets_trust_threshold = (review.security_score or 0) >= REVIEW_TRUST_SCORE_THRESHOLD
                 review_accepted = bool(review.approved) and meets_trust_threshold
 
@@ -227,11 +244,12 @@ async def run_pipeline_generator(
                     )
                     yield json.dumps({
                         "status": "reviewer_done",
-                        "message": (
-                            f"Code approved on pass {attempt} "
-                            f"(trust score {review.security_score}/{10})."
-                        ),
-                        "artifact": review_artifact_for_completion
+                        "message": "Review completed.",
+                        "artifact": review_artifact_for_completion,
+                        "attempt": attempt,
+                        "issues_count": len(review.issues or []),
+                        "affected_files": list(review.affected_files or []),
+                        "security_score": review.security_score,
                     })
                     break
 
@@ -250,12 +268,11 @@ async def run_pipeline_generator(
                     yield json.dumps(
                         {
                             "status": "revision",
-                            "message": (
-                                f"Pass {attempt}: reviewer provided code fixes; "
-                                "re-reviewing updated files..."
-                            ),
+                            "message": "Reviewer applied fixes and is re-checking the updated code.",
                             "attempt": attempt,
                             "issues_count": len(review.issues),
+                            "affected_files": list(review.affected_files or []),
+                            "security_score": review.security_score,
                         }
                     )
                     continue
@@ -293,8 +310,12 @@ async def run_pipeline_generator(
                     )
                     yield json.dumps({
                         "status": "reviewer_done",
-                        "message": f"Review found {len(review.issues)} issue(s); returning generated code without reviewer rewrites.",
-                        "artifact": review_artifact_for_completion
+                        "message": "Review completed.",
+                        "artifact": review_artifact_for_completion,
+                        "attempt": attempt,
+                        "issues_count": len(review.issues or []),
+                        "affected_files": list(review.affected_files or []),
+                        "security_score": review.security_score,
                     })
                     break
 
@@ -314,22 +335,23 @@ async def run_pipeline_generator(
 
                 yield json.dumps({
                     "status": "revision",
-                    "message": (
-                        f"Pass {attempt}: {len(review.issues)} reviewer issue(s) "
-                        f"(trust score {review.security_score}/{10}) - regenerating "
-                        "affected files and re-reviewing..."
-                    ),
+                    "message": "Reviewer requested targeted fixes. Regenerating affected files and re-checking.",
                     "attempt": attempt,
                     "issues_count": len(review.issues),
                     "affected_files": [getattr(req, "path", None) for req in patch_requests if getattr(req, "path", None)],
+                    "security_score": review.security_score,
                 })
             else:
                 # Exhausted all retries without approval
                 logger.warning(f"Code not approved after {MAX_REVIEW_ITERATIONS} review passes")
                 yield json.dumps({
                     "status": "reviewer_done",
-                    "message": f"Review completed after {MAX_REVIEW_ITERATIONS} passes (some issues may remain).",
-                    "artifact": review_artifact_for_completion
+                    "message": "Review completed.",
+                    "artifact": review_artifact_for_completion,
+                    "attempt": MAX_REVIEW_ITERATIONS,
+                    "issues_count": len(review_artifact_for_completion.get("issues") or []),
+                    "affected_files": list(review_artifact_for_completion.get("affected_files") or []),
+                    "security_score": review_artifact_for_completion.get("security_score"),
                 })
         except Exception as review_error:
             logger.warning("Reviewer stage failed; continuing with implementer output: %s", review_error)
@@ -343,8 +365,120 @@ async def run_pipeline_generator(
             yield json.dumps({
                 "status": "reviewer_done",
                 "message": "Reviewer failed; returning generated code without review approval.",
-                "artifact": review_artifact_for_completion
+                "artifact": review_artifact_for_completion,
+                "attempt": MAX_REVIEW_ITERATIONS,
+                "issues_count": 0,
+                "affected_files": [],
+                "security_score": review_artifact_for_completion.get("security_score"),
             })
+
+        normalized_runtime_mode = (runtime_mode or "sandbox").strip().lower()
+        if normalized_runtime_mode == "local_cli":
+            review_artifact_for_completion["runtime_mode"] = "local_cli"
+            review_artifact_for_completion["approved"] = True
+            review_artifact_for_completion.setdefault("suggestions", []).append(
+                "Skipped backend Docker sandbox repair for CLI local runtime mode. The CLI will validate startup locally."
+            )
+            yield json.dumps({
+                "status": "completed",
+                "message": "Review completed. Skipping backend sandbox repair for CLI local runtime mode.",
+                "artifact": review_artifact_for_completion,
+            })
+            _update_run_status_safely(session=session, run_id=run_id, status="completed")
+            return
+
+        # 6. Runtime repair loop
+        MAX_REPAIR_ITERATIONS = 3
+        repair_agent = RepairAgent(max_iterations=MAX_REPAIR_ITERATIONS)
+        repair_context = RepairContext(
+            architecture=architecture,
+            code=code,
+            review_report=ReviewReport.model_validate(review_artifact_for_completion),
+            project_id=str(project_id),
+        )
+        yield json.dumps({
+            "status": "repairer",
+            "message": "Running runtime repair checks on the generated API..."
+        })
+
+        try:
+            repair_result = await repair_agent.run(repair_context)
+            code = GeneratedCode(files=repair_result.final_code, dependencies=code.dependencies)
+            repair_artifact_for_completion = repair_result.model_dump()
+
+            for attempt in range(1, repair_result.attempts + 1):
+                changed_paths = list(repair_result.affected_files or [])
+                yield json.dumps({
+                    "status": "repair_revision",
+                    "message": "Repair is applying sandbox-driven fixes from container logs and endpoint smoke checks.",
+                    "attempt": attempt,
+                    "issues_count": len(repair_result.failures or []),
+                    "affected_files": changed_paths,
+                })
+
+                create_artifact_record(
+                    session=session,
+                    artifact_in=ArtifactRecordCreate(
+                        run_id=run_id,
+                        stage=f"repairer_pass_{attempt}",
+                        content=_compact_review_for_db(
+                            run_id=run_id,
+                            stage=f"repairer_pass_{attempt}",
+                            review_artifact=repair_artifact_for_completion,
+                            dependencies=code.dependencies,
+                        ),
+                    )
+                )
+        except Exception as repair_error:
+            logger.warning("Repair stage failed; continuing with latest generated code: %s", repair_error, exc_info=True)
+            repair_artifact_for_completion = {
+                "passed": False,
+                "repaired": False,
+                "attempts": 0,
+                "affected_files": [],
+                "failures": [],
+                "warnings": [f"Repair stage failed: {repair_error}"],
+                "patch_requests": [],
+                "summary": f"Repair stage failed: {repair_error}. Returning latest generated code.",
+                "final_code": [file.model_dump() for file in code.files],
+            }
+        create_artifact_record(
+            session=session,
+            artifact_in=ArtifactRecordCreate(
+                run_id=run_id,
+                stage="repairer_final",
+                content=_compact_review_for_db(
+                    run_id=run_id,
+                    stage="repairer_final",
+                    review_artifact=repair_artifact_for_completion,
+                    dependencies=code.dependencies,
+                ),
+            )
+        )
+
+        review_artifact_for_completion["final_code"] = [file.model_dump() for file in code.files]
+        review_artifact_for_completion["repair"] = repair_artifact_for_completion
+        review_artifact_for_completion["approved"] = bool(repair_artifact_for_completion.get("passed"))
+        if review_artifact_for_completion["repair"]["summary"] not in (review_artifact_for_completion.get("suggestions") or []):
+            review_artifact_for_completion.setdefault("suggestions", []).append(review_artifact_for_completion["repair"]["summary"])
+
+        yield json.dumps({
+            "status": "repairer_done",
+            "message": review_artifact_for_completion["repair"]["summary"],
+            "artifact": repair_artifact_for_completion,
+            "attempt": repair_artifact_for_completion.get("attempts", 0),
+            "issues_count": len(repair_artifact_for_completion.get("failures") or []),
+            "affected_files": list(repair_artifact_for_completion.get("affected_files") or []),
+        })
+
+        if not review_artifact_for_completion["approved"]:
+            yield json.dumps({
+                "status": "error",
+                "message": "Pipeline failed to generate a working API that passes all deployed checks.",
+                "artifact": review_artifact_for_completion,
+            })
+            _update_run_status_safely(session=session, run_id=run_id, status="failed")
+            return
 
         yield json.dumps({
             "status": "completed",

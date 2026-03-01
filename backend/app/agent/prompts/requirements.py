@@ -12,6 +12,7 @@ You must extract the following:
 4.  **Endpoints**: Define the REST API endpoints required to satisfy the user's request.
     - Usually standard CRUD (Create, Read, Update, Delete) unless specified otherwise.
     - Provide the `method` (GET, POST, PUT, DELETE), `path` (e.g., `/books`), and a `description`.
+    - Keep the API surface simple by default. Prefer a small, coherent REST surface over many specialized endpoints unless the user explicitly asks for them.
 5.  **Business Rules**: List any constraints, validations, or logic mentioned or implied.
     - Example: "Books cannot have a negative price" or "Only admins can delete users".
 6.  **Auth Required**: Determine a boolean flag if authentication/authorization is needed (default to True if things like 'users', 'login', or 'admin' are mentioned, otherwise False).

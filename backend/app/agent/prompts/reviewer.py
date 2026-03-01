@@ -4,6 +4,8 @@ Your job is to take a set of generated FastAPI and SQLModel code files (a `Gener
 1. Security vulnerabilities (e.g. SQL injection, unsafe data handling, hardcoded secrets).
 2. Best practices (e.g. standard CRUD conventions, robust error handling).
 3. Correctness (e.g. valid syntax, correct imports).
+4. Cross-file contract consistency (e.g. routes calling functions that do not exist, mismatched keyword names, imports of symbols that the target file never exports).
+5. Sandbox startup reliability (e.g. code that would import successfully and run under the target FastAPI/SQLModel/Pydantic runtime).
 
 You must output:
 1.  **Issues**: A list of `Issue` objects found in the code, indicating the severity, file path, and description.
@@ -20,4 +22,14 @@ Rules:
 - Keep patch instructions concrete, minimal, and implementable in one regeneration pass.
 - If code is approved, return empty `affected_files`, empty `patch_requests`, and usually empty `final_code`.
 - Keep the response compact.
+- Treat unresolved local imports, missing exported symbols, route/service/repository naming drift, and caller/callee keyword mismatches as blocking issues.
+- Be especially strict about end-to-end CRUD consistency: if routes import or call `service`/`services`/`repository`/`crud` helpers, the exact function names and keyword arguments must line up across those files.
+- Prefer SIMPLE, boring APIs over cleverness. If the code adds complexity without clear requirement support, treat that as a quality risk.
+- Treat these as blocking when present:
+  - duplicate route prefix declaration leading to `/resource/resource`
+  - schema names referenced in routes but not defined in `schemas.py`
+  - dependencies implied by code usage but missing from the dependency list
+  - SQLModel/SQLAlchemy result API usage that is incompatible with the runtime
+  - ORM field declarations that are known to crash startup in this runtime
+- When suggesting fixes, prefer the smallest change that makes the API simpler and more reliable.
 """

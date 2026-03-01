@@ -111,7 +111,7 @@ class ReviewReport(BaseModel):
 
 
 class TestFailure(BaseModel):
-    check: Literal["syntax", "import_smoke"]
+    check: Literal["syntax", "import_smoke", "endpoint_smoke"]
     message: str
     file_path: str | None = None
     line_number: int | None = None
@@ -127,3 +127,22 @@ class TestRunReport(BaseModel):
         default_factory=list,
         description="Targeted file patch requests derived from deterministic test failures",
     )
+
+
+class RepairContext(BaseModel):
+    architecture: SystemArchitecture
+    code: GeneratedCode
+    review_report: ReviewReport | None = None
+    project_id: str | None = None
+
+
+class RepairReport(BaseModel):
+    passed: bool = Field(description="Whether runtime repair validation passed")
+    repaired: bool = Field(description="Whether any repair pass modified the generated code")
+    attempts: int = Field(ge=0, description="Number of repair passes applied")
+    affected_files: list[str] = Field(default_factory=list, description="Files modified during repair")
+    failures: list[TestFailure] = Field(default_factory=list, description="Latest remaining runtime failures")
+    warnings: list[str] = Field(default_factory=list, description="Non-blocking repair/runtime warnings")
+    patch_requests: list[FilePatchRequest] = Field(default_factory=list, description="Latest targeted patch requests")
+    final_code: list[CodeFile] = Field(default_factory=list, description="Final repaired code returned to the user")
+    summary: str = Field(description="Concise repair outcome summary")

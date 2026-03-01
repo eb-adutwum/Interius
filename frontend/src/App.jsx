@@ -49,7 +49,7 @@ function AppRoutes() {
           }
         />
         <Route
-          path="/chat"
+          path="/chat/:threadId?"
           element={
             <ProtectedRoute>
               <ChatPage theme={theme} onThemeToggle={toggleTheme} />

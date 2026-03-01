@@ -50,6 +50,7 @@ class ChatGenerateStreamRequest(BaseModel):
     recent_messages: list[InterfaceContextMessage] = Field(default_factory=list)
     attachment_summaries: list[InterfaceAttachmentSummary] = Field(default_factory=list)
     thread_context_files: list[ThreadContextFile] = Field(default_factory=list)
+    runtime_mode: str = "sandbox"
     stop_after_architecture: bool = False
     resume_from_stage: str | None = None  # currently supports "post_architecture"
     approved_requirements_artifact: dict[str, Any] | None = None
@@ -457,6 +458,7 @@ async def run_interface_then_pipeline_ui_stream(
         "architecture": ("architecture", 1, "arch"),
         "implementer": ("implementer", 2, "code"),
         "reviewer": ("reviewer", 2, "review"),
+        "repairer": ("repairer", 2, "review"),
         "tester": ("tester", 2, "review"),
     }
 
@@ -465,6 +467,7 @@ async def run_interface_then_pipeline_ui_stream(
         project_id,
         run.id,
         pipeline_prompt,
+        runtime_mode=payload.runtime_mode,
         charter_override=approved_charter_obj,
         architecture_override=approved_arch_obj,
         start_stage="implementer" if is_resume_from_architecture else "requirements",
@@ -552,12 +555,6 @@ async def run_interface_then_pipeline_ui_stream(
             captured["code_files"] = files
             captured["dependencies"] = dependencies
             yield _ui_event("stage_completed", stage="implementer", phase=2, step="code")
-            yield _ui_event(
-                "artifact_files",
-                files=files,
-                dependencies=dependencies,
-                files_count=event.get("files_count", len(files)),
-            )
             continue
 
         if status == "revision":
@@ -567,7 +564,22 @@ async def run_interface_then_pipeline_ui_stream(
                 message=event.get("message"),
                 attempt=event.get("attempt"),
                 issues_count=event.get("issues_count"),
+                security_score=event.get("security_score"),
                 affected_files=event.get("affected_files") or [],
+            )
+            continue
+
+        if status == "review_pass":
+            yield _ui_event(
+                "review_update",
+                kind="pass",
+                message=event.get("message"),
+                attempt=event.get("attempt"),
+                issues_count=event.get("issues_count"),
+                security_score=event.get("security_score"),
+                affected_files=event.get("affected_files") or [],
+                approved=event.get("approved"),
+                meets_trust_threshold=event.get("meets_trust_threshold"),
             )
             continue
 
@@ -578,24 +590,73 @@ async def run_interface_then_pipeline_ui_stream(
             if final_code:
                 captured["code_files"] = final_code
             yield _ui_event("stage_completed", stage="reviewer", phase=2, step="review")
+            if payload.runtime_mode == "local_cli" and captured.get("code_files"):
+                yield _ui_event(
+                    "artifact_files",
+                    files=captured.get("code_files") or [],
+                    dependencies=captured.get("dependencies") or [],
+                    files_count=len(captured.get("code_files") or []),
+                )
             yield _ui_event(
                 "review_update",
-                kind="completed",
+                kind="failed" if str(event.get("message") or "").lower().startswith("reviewer failed") else "completed",
                 message=event.get("message"),
                 artifact=review_artifact,
+                attempt=event.get("attempt"),
+                issues_count=event.get("issues_count"),
+                security_score=event.get("security_score", review_artifact.get("security_score")),
+                affected_files=event.get("affected_files") or review_artifact.get("affected_files") or [],
+            )
+            continue
+
+        if status == "repair_revision":
+            yield _ui_event(
+                "review_update",
+                kind="repair_revision",
+                message=event.get("message"),
+                attempt=event.get("attempt"),
+                issues_count=event.get("issues_count"),
+                affected_files=event.get("affected_files") or [],
+            )
+            continue
+
+        if status == "repairer_done":
+            repair_artifact = event.get("artifact") or {}
+            final_code = repair_artifact.get("final_code") or []
+            if final_code:
+                captured["code_files"] = final_code
+            yield _ui_event("stage_completed", stage="repairer", phase=2, step="review")
+            if repair_artifact.get("passed") and captured.get("code_files"):
+                yield _ui_event(
+                    "artifact_files",
+                    files=captured.get("code_files") or [],
+                    dependencies=captured.get("dependencies") or [],
+                    files_count=len(captured.get("code_files") or []),
+                )
+            yield _ui_event(
+                "review_update",
+                kind="repair_completed",
+                message=event.get("message"),
+                artifact=repair_artifact,
+                attempt=event.get("attempt"),
+                issues_count=event.get("issues_count"),
+                affected_files=event.get("affected_files") or repair_artifact.get("affected_files") or [],
             )
             continue
 
         if status == "tester_done":
+            test_artifact = event.get("artifact") or {}
+            test_failures = test_artifact.get("failures") or []
             yield _ui_event("stage_completed", stage="tester", phase=2, step="review")
             yield _ui_event(
                 "review_update",
                 kind="tests",
                 message=event.get("message"),
-                artifact=event.get("artifact") or {},
+                artifact=test_artifact,
+                issues_count=len(test_failures) if isinstance(test_failures, list) else None,
                 affected_files=[
                     req.get("path")
-                    for req in ((event.get("artifact") or {}).get("patch_requests") or [])
+                    for req in (test_artifact.get("patch_requests") or [])
                     if isinstance(req, dict) and req.get("path")
                 ],
             )

@@ -1,0 +1,32 @@
+{
+  "name": "@interius/cli",
+  "version": "0.1.0",
+  "description": "Interius CLI for generating backend projects into the local workspace and running them locally.",
+  "keywords": [
+    "interius",
+    "cli",
+    "fastapi",
+    "codegen",
+    "agent"
+  ],
+  "type": "module",
+  "bin": {
+    "interius": "bin/interius.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check": "node --test && node --check ./bin/interius.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "UNLICENSED"
+}

@@ -20,6 +20,8 @@ Rules:
 - The Mermaid diagram should show backend runtime components and their relationships, not delivery pipeline or cloud provisioning concerns.
 - Avoid CI/CD, deployment pipelines, GitHub Actions, Docker build stages, observability stacks, cloud networking, load balancers, secrets managers, or infrastructure details unless the charter explicitly requires them as core product behavior.
 - If the charter is simple, keep the architecture simple: API -> service/business logic -> persistence -> database.
+- Prefer architecture choices that make code generation robust: one clear routing layer, straightforward persistence flow, and minimal naming indirection.
+- Avoid designing unnecessary route nesting or overlapping prefixes for the same resource.
 - `mermaid_diagram` must contain Mermaid syntax only (no ``` fences).
 - Mermaid must be valid and copy-pastable into Mermaid Live Editor.
 - Always start Mermaid with `flowchart TD` (not LR/RL).

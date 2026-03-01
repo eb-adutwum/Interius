@@ -32,6 +32,12 @@ export default function Navbar({ onLoginClick, theme, onThemeToggle }) {
             About
           </NavLink>
           <NavLink
+            to="/cli"
+            className={({ isActive }) => `navbar-link${isActive ? ' active' : ''}`}
+          >
+            CLI Guide
+          </NavLink>
+          <NavLink
             to="/research"
             className={({ isActive }) => `navbar-link${isActive ? ' active' : ''}`}
           >
