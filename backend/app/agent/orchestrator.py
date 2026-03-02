@@ -459,6 +459,7 @@ async def run_pipeline_generator(
         review_artifact_for_completion["final_code"] = [file.model_dump() for file in code.files]
         review_artifact_for_completion["repair"] = repair_artifact_for_completion
         review_artifact_for_completion["approved"] = bool(repair_artifact_for_completion.get("passed"))
+        review_artifact_for_completion["artifacts_released"] = bool(review_artifact_for_completion.get("final_code"))
         if review_artifact_for_completion["repair"]["summary"] not in (review_artifact_for_completion.get("suggestions") or []):
             review_artifact_for_completion.setdefault("suggestions", []).append(review_artifact_for_completion["repair"]["summary"])
         if (
@@ -479,12 +480,15 @@ async def run_pipeline_generator(
         })
 
         if not review_artifact_for_completion["approved"]:
+            review_artifact_for_completion.setdefault("suggestions", []).append(
+                "Artifacts are being returned even though runtime validation still reports blocking issues. Review the generated files before deployment."
+            )
             yield json.dumps({
-                "status": "error",
-                "message": "Pipeline failed to generate a working API that passes all deployed checks.",
+                "status": "completed",
+                "message": "Pipeline finished with generated artifacts, but runtime validation still reported blocking issues.",
                 "artifact": review_artifact_for_completion,
             })
-            _update_run_status_safely(session=session, run_id=run_id, status="failed")
+            _update_run_status_safely(session=session, run_id=run_id, status="completed")
             return
 
         yield json.dumps({
